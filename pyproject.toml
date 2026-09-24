@@ -12,6 +12,7 @@ dependencies = [
 # Commands installed by `uv sync`, e.g. `uv run cozysetup-admin pending`.
 [project.scripts]
 cozysetup-admin = "cozysetup.admin:main"
+cozysetup-chat = "cozysetup.chat:main"
 
 # How to install this project as a package. uv_build is uv's own builder;
 # module-root = "" because the cozysetup/ folder sits directly in the project.
