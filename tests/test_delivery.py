@@ -505,3 +505,64 @@ def test_a_failed_reminder_does_not_cancel_anything_else(service, clock):
     statuses = {m.kind.value: m.status.value for m in outbox.messages_for(service.db, booking.id)}
     assert statuses == {"confirmation": "sent", "reminder": "failed"}
     assert len(service.list_handoffs()) == 1
+
+
+# --- Send-yourself messages expire when too late, but are never sent (Step 6.4) ----------------
+
+def owner_confirmed(service, booking_date=THURSDAY):
+    return service.create_owner_booking(
+        booking_date=booking_date, location_id="bnaider", customer_name="Mona", customer_phone="66666666",
+        payment_choice="full", paid=True,
+    ).booking
+
+
+def test_send_yourself_messages_that_are_still_in_time_stay_untouched(service, clock):
+    booking = owner_confirmed(service)
+    sender = RecordingSender()
+    clock.now = at(THURSDAY, 17, 59)                       # reminder due at 15:00, setup at 18:00
+    assert deliver(service, {"terminal": sender, "owner": sender}) == []
+    assert sender.sent == []
+    assert {m.status for m in outbox.messages_for(service.db, booking.id)} == {OutboxStatus.SEND_YOURSELF}
+
+
+def test_a_send_yourself_reminder_expires_once_the_setup_starts(service, clock):
+    booking = owner_confirmed(service)
+    sender = RecordingSender()
+    clock.now = at(THURSDAY, 18, 0)
+    results = outbox.deliver_due(service, {"terminal": sender, "owner": sender})
+    assert [(r.message.kind.value, r.outcome, r.detail) for r in results] == [
+        ("reminder", "cancelled", "send yourself - expired: too late: the setup has already started")]
+    assert sender.sent == []                                 # never sent automatically
+    reminder = message(service, booking, OutboxKind.REMINDER)
+    assert (reminder.status, reminder.last_error) == (OutboxStatus.CANCELLED, "too late: the setup has already started")
+    assert message(service, booking, OutboxKind.CONFIRMATION).status is OutboxStatus.SEND_YOURSELF
+    assert "reminder to send yourself expired: too late: the setup has already started" in [
+        e["details"] for e in service.booking_history(booking.reference)]
+
+
+def test_a_send_yourself_confirmation_expires_after_the_booking_date(service, clock):
+    booking = owner_confirmed(service)
+    clock.now = at(date(2026, 10, 2), 9)
+    outcomes = {(r.message.kind.value, r.outcome) for r in outbox.deliver_due(service, {})}
+    assert outcomes == {("confirmation", "cancelled"), ("reminder", "cancelled")}
+    assert message(service, booking, OutboxKind.CONFIRMATION).last_error == "too late: the booking date has passed"
+
+
+def test_a_send_yourself_message_already_marked_sent_does_not_expire(service, clock):
+    booking = owner_confirmed(service)
+    confirmation = message(service, booking, OutboxKind.CONFIRMATION)
+    outbox.mark_sent_by_owner(service, confirmation.id)
+    clock.now = at(date(2026, 10, 2), 9)
+    outbox.deliver_due(service, {})
+    assert message(service, booking, OutboxKind.CONFIRMATION).status is OutboxStatus.SENT
+
+
+def test_run_reports_expired_send_yourself_messages(tmp_path, clock, capsys):
+    path = tmp_path / "practice.db"
+    db = connect(path)
+    owner_confirmed(BookingService(db, INFO, clock=clock, proofs_dir=tmp_path / "proofs"))
+    db.close()
+    clock.now = at(THURSDAY, 18, 30)
+    assert send_outbox.main(["--db", str(path), "run"], clock=clock) == 0
+    out = capsys.readouterr().out
+    assert "– not sent  reminder for CS-0001: send yourself - expired: too late: the setup has already started" in out

@@ -43,6 +43,7 @@ class OutboxMessage:
     last_error: str | None
     created_at: datetime
     sent_at: datetime | None
+    updated_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> OutboxMessage:
@@ -60,6 +61,7 @@ class OutboxMessage:
             last_error=row["last_error"],
             created_at=datetime.fromisoformat(row["created_at"]),
             sent_at=datetime.fromisoformat(row["sent_at"]) if row["sent_at"] else None,
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
 
@@ -103,6 +105,18 @@ def cancel_waiting(db: sqlite3.Connection, booking_id: int, now: datetime,
     return cursor.rowcount
 
 
+def get_message(db: sqlite3.Connection, message_id: int) -> OutboxMessage | None:
+    row = db.execute("SELECT * FROM outbox WHERE id = ?", (message_id,)).fetchone()
+    return OutboxMessage.from_row(row) if row else None
+
+
+def next_retry(message: OutboxMessage) -> datetime | None:
+    """When a failed-but-retrying message will be tried again."""
+    if message.status is not OutboxStatus.PENDING or not message.attempts or not message.updated_at:
+        return None
+    return message.updated_at + RETRY_WAITS[min(message.attempts, len(RETRY_WAITS)) - 1]
+
+
 def messages_for(db: sqlite3.Connection, booking_id: int) -> list[OutboxMessage]:
     rows = db.execute("SELECT * FROM outbox WHERE booking_id = ? ORDER BY id", (booking_id,))
     return [OutboxMessage.from_row(row) for row in rows]
@@ -142,6 +156,43 @@ def _queue(db: sqlite3.Connection, info: BusinessInfo, booking, kind: OutboxKind
     return f"{kind.value} queued {who}, from {send_after:%d %b %H:%M}"
 
 
+# --- The owner marks a message as sent ------------------------------------------------
+
+class OutboxRefused(Exception):
+    """The owner asked for something the outbox rules don't allow."""
+
+
+# The owner may mark these as sent: messages only the owner sends, and ones the
+# automatic sender gave up on (the owner then contacted the customer personally).
+OWNER_CAN_MARK_SENT = (OutboxStatus.SEND_YOURSELF, OutboxStatus.FAILED)
+
+
+def mark_sent_by_owner(service, message_id: int, note: str = "") -> OutboxMessage:
+    """The owner sent this message personally. Checked again inside the transaction."""
+    with service.write_transaction():
+        message = get_message(service.db, message_id)
+        if message is None:
+            raise OutboxRefused(f"No message #{message_id}")
+        if message.status not in OWNER_CAN_MARK_SENT:
+            reason = {
+                OutboxStatus.PENDING: "the automatic sender handles it",
+                OutboxStatus.SENT: "it was already sent",
+                OutboxStatus.CANCELLED: "it was cancelled",
+            }[message.status]
+            raise OutboxRefused(f"Message #{message_id} can't be marked as sent: {reason}")
+        booking = service.get_booking_by_id(message.booking_id)
+        if booking.status is not BookingStatus.CONFIRMED:
+            raise OutboxRefused(f"Message #{message_id} can't be marked as sent: "
+                                f"{booking.reference} is {booking.status.value}")
+        stamp = service.now().isoformat(timespec="seconds")
+        service.db.execute("UPDATE outbox SET status = ?, sent_at = ?, updated_at = ? WHERE id = ?",
+                           (OutboxStatus.SENT.value, stamp, stamp, message.id))
+        how = " after automatic sending failed" if message.status is OutboxStatus.FAILED else ""
+        service.add_owner_history(booking.id, "outbox",
+                                  f"{message.kind.value} sent by the owner{how}" + (f" ({note})" if note else ""))
+    return get_message(service.db, message_id)
+
+
 # --- Delivering due messages (the outbox sender) -------------------------------------
 #
 # Each due message is handled on its own:
@@ -171,7 +222,7 @@ def deliver_due(service, senders: dict, now: datetime | None = None) -> list[Del
         "SELECT * FROM outbox WHERE status = ? AND send_after <= ? ORDER BY send_after, id",
         (OutboxStatus.PENDING.value, now.isoformat(timespec="seconds")),
     ).fetchall()
-    results = []
+    results = _expire_send_yourself(service, now)
     for message in (OutboxMessage.from_row(row) for row in rows):
         try:
             if not _retry_wait_over(service.db, message, now):
@@ -184,6 +235,36 @@ def deliver_due(service, senders: dict, now: datetime | None = None) -> list[Del
             result = Delivery(message, f"message #{message.id}", "error", f"{type(error).__name__}: {error}")
         if result:
             results.append(result)
+    return results
+
+
+def _expire_send_yourself(service, now: datetime) -> list[Delivery]:
+    """"Send yourself" messages are never sent automatically - but once they are too
+    late (same rules as automatic messages), they are marked cancelled."""
+    rows = service.db.execute(
+        "SELECT * FROM outbox WHERE status = ? AND send_after <= ? ORDER BY send_after, id",
+        (OutboxStatus.SEND_YOURSELF.value, now.isoformat(timespec="seconds")),
+    ).fetchall()
+    results = []
+    for message in (OutboxMessage.from_row(row) for row in rows):
+        try:
+            with service.write_transaction():
+                booking = service.get_booking_by_id(message.booking_id)
+                reason = _no_longer_valid(service.info, booking, message, now)
+                if not reason:
+                    continue
+                expired = service.db.execute(
+                    "UPDATE outbox SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = ?",
+                    (OutboxStatus.CANCELLED.value, reason, now.isoformat(timespec="seconds"), message.id,
+                     OutboxStatus.SEND_YOURSELF.value),
+                ).rowcount
+                if expired:
+                    service.add_system_history(booking.id, "outbox",
+                                               f"{message.kind.value} to send yourself expired: {reason}")
+                    results.append(Delivery(message, booking.reference, "cancelled",
+                                            f"send yourself - expired: {reason}"))
+        except Exception as error:
+            results.append(Delivery(message, f"message #{message.id}", "error", f"{type(error).__name__}: {error}"))
     return results
 
 

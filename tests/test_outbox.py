@@ -299,3 +299,55 @@ def test_an_unknown_language_is_refused_and_nothing_saved(service):
 
 def test_owner_bookings_have_no_recorded_language(service):
     assert owner_booking(service).language is None
+
+
+# --- The owner marks a message as sent (Step 6.4) -------------------------------------
+
+def test_owner_marks_a_send_yourself_message_as_sent(service):
+    booking = owner_booking(service)
+    confirmation = messages(service, booking)["confirmation", "send_yourself"]
+    marked = outbox.mark_sent_by_owner(service, confirmation.id, "sent on WhatsApp")
+    assert (marked.status, marked.sent_at) == (OutboxStatus.SENT, MONDAY_2PM)
+    entry = [e for e in service.booking_history(booking.reference) if e["actor"] == "owner"][-1]
+    assert entry["details"] == "confirmation sent by the owner (sent on WhatsApp)"
+
+
+def test_owner_marks_a_failed_message_as_sent(service):
+    booking = ai_booking(service)
+    service.approve_payment(booking.reference)
+    with service.db:
+        service.db.execute("UPDATE outbox SET status = 'failed' WHERE booking_id = ? AND kind = 'confirmation'",
+                           (booking.id,))
+    confirmation = messages(service, booking)["confirmation", "failed"]
+    assert outbox.mark_sent_by_owner(service, confirmation.id).status is OutboxStatus.SENT
+    assert "confirmation sent by the owner after automatic sending failed" in [
+        e["details"] for e in service.booking_history(booking.reference)]
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [("pending", "the automatic sender handles it"), ("sent", "it was already sent"),
+     ("cancelled", "it was cancelled")],
+)
+def test_owner_cannot_mark_other_messages_as_sent(service, status, reason):
+    booking = ai_booking(service)
+    service.approve_payment(booking.reference)
+    confirmation = messages(service, booking)["confirmation", "pending"]
+    with service.db:
+        service.db.execute("UPDATE outbox SET status = ? WHERE id = ?", (status, confirmation.id))
+    with pytest.raises(outbox.OutboxRefused, match=reason):
+        outbox.mark_sent_by_owner(service, confirmation.id)
+
+
+def test_owner_cannot_mark_sent_when_the_booking_is_no_longer_confirmed(service):
+    booking = owner_booking(service)
+    confirmation = messages(service, booking)["confirmation", "send_yourself"]
+    with service.db:   # changed by hand, bypassing cancel (which would have cancelled the message)
+        service.db.execute("UPDATE bookings SET status = 'cancelled' WHERE id = ?", (booking.id,))
+    with pytest.raises(outbox.OutboxRefused, match="CS-0001 is cancelled"):
+        outbox.mark_sent_by_owner(service, confirmation.id)
+
+
+def test_owner_cannot_mark_an_unknown_message(service):
+    with pytest.raises(outbox.OutboxRefused, match="No message #7"):
+        outbox.mark_sent_by_owner(service, 7)

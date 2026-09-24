@@ -5,6 +5,7 @@
     uv run cozysetup-admin show CS-0001
     uv run cozysetup-admin approve CS-0001 "25 KWD received"
     uv run cozysetup-admin overview
+    uv run cozysetup-admin outbox
 
 Every command goes through the BookingService, so every booking rule applies.
 Add --db PATH to practise on a separate database instead of the real one.
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from cozysetup import outbox
 from cozysetup.bookings import Approval, Booking, BookingRefused, BookingService, DateStatus, Handoff
 from cozysetup.business_info import (
     BusinessInfo,
@@ -28,7 +30,7 @@ from cozysetup.business_info import (
     load_business_info,
     normalize_name,
 )
-from cozysetup.database import DEFAULT_DB_PATH, BookingStatus, HandoffStatus, HandoffType, connect
+from cozysetup.database import DEFAULT_DB_PATH, BookingStatus, HandoffStatus, HandoffType, OutboxKind, OutboxStatus, connect
 from cozysetup.rules import PaymentChoice, format_kwd
 
 STATUS_LABELS = {
@@ -200,6 +202,12 @@ def command_show(ctx: Context, args: argparse.Namespace) -> int:
     print(f"  Via Wamd:    {show.payment(booking)}")
     print(f"  On the day:  {show.due_on_day(booking)}")
     print(f"  Screenshot:  {booking.payment_proof or 'none'}")
+    messages = outbox.messages_for(service.db, booking.id)
+    if messages:
+        print()
+        print("  Messages:")
+        for message in messages:
+            print(f"    #{message.id:<3} {message.kind.value:<13} {describe_message_state(message, service.now())}")
     print()
     print("  History:")
     for event in service.booking_history(booking.reference):
@@ -257,6 +265,8 @@ def command_add(ctx: Context, args: argparse.Namespace) -> int:
     )
     print(f"✓ {result.booking.reference} created - {show.status(result.booking)}")
     report_conflicts(show, result)
+    if args.paid:
+        report_confirmation_messages(ctx, result.booking)
     return 0
 
 
@@ -283,7 +293,7 @@ def command_approve(ctx: Context, args: argparse.Namespace) -> int:
     result = ctx.service.approve_payment(booking.reference, args.note)
     print(f"✓ {booking.reference} confirmed - {show.day(booking.booking_date)} is now blocked.")
     report_conflicts(show, result)
-    print(NOT_TOLD)
+    report_confirmation_messages(ctx, result.booking)
     return 0
 
 
@@ -318,6 +328,7 @@ def command_cancel(ctx: Context, args: argparse.Namespace) -> int:
                      "Any refund is up to you, outside the system.")
     if not ctx.confirm(args, lines):
         return 1
+    waiting_before = len(waiting_messages(service, booking))
     service.cancel_booking(booking.reference, args.note)
     print(f"✓ {booking.reference} cancelled.")
     if booking.status is BookingStatus.CONFIRMED:
@@ -326,7 +337,12 @@ def command_cancel(ctx: Context, args: argparse.Namespace) -> int:
         if waiting:
             print("  Still waiting for that date (you may approve one): "
                   + ", ".join(b.reference for b in waiting))
-    print(NOT_TOLD)
+    cancelled = waiting_before - len(waiting_messages(service, booking))
+    if cancelled:
+        print(f"{cancelled} waiting message{'' if cancelled == 1 else 's'} cancelled. "
+              "Tell the customer about the cancellation yourself.")
+    else:
+        print("Tell the customer about the cancellation yourself.")
     return 0
 
 
@@ -358,7 +374,13 @@ def command_reschedule(ctx: Context, args: argparse.Namespace) -> int:
     result = service.reschedule_booking(booking.reference, new_date, args.note)
     print(f"✓ {booking.reference} moved to {show.day(new_date)}.")
     report_conflicts(show, result)
-    print(NOT_TOLD)
+    reminder = next((m for m in waiting_messages(service, result.booking) if m.kind is OutboxKind.REMINDER), None)
+    if reminder:
+        print(f"Reminder moved to {when(reminder.send_after)}. Tell the customer about the new date yourself.")
+    elif result.booking.status is BookingStatus.CONFIRMED:
+        print("No reminder: its time on the new date has passed. Tell the customer about the new date yourself.")
+    else:
+        print("Tell the customer about the new date yourself.")
     return 0
 
 
@@ -451,6 +473,17 @@ def command_overview(ctx: Context, args: argparse.Namespace) -> int:
     if to_complete:
         attention = True
         print("  Past setups to mark as completed: " + ", ".join(b.reference for b in to_complete))
+    now = service.now()
+    messages = outbox.list_messages(service.db, (OutboxStatus.SEND_YOURSELF, OutboxStatus.FAILED,
+                                                 OutboxStatus.PENDING))
+    send_now = [m for m in messages if m.status is OutboxStatus.SEND_YOURSELF and m.send_after <= now]
+    failed = [m for m in messages if m.status is OutboxStatus.FAILED]
+    if send_now:
+        attention = True
+        print(f"  {len(send_now)} message(s) to send yourself now - see: outbox")
+    if failed:
+        attention = True
+        print(f"  {len(failed)} message(s) failed to send - see: outbox, handoffs")
     if not attention:
         print("  Nothing - all clear.")
 
@@ -473,7 +506,170 @@ def command_overview(ctx: Context, args: argparse.Namespace) -> int:
 
     waiting = [booking for booking in pending if booking.booking_date >= today]
     print(f"\nWAITING FOR PAYMENT: {len(waiting)} booking(s) - see: pending")
+
+    print("\nMESSAGES")
+    upcoming_auto = [m for m in messages if m.status is OutboxStatus.PENDING]
+    if send_now:
+        print(f"  {len(send_now)} to send yourself now - see: outbox")
+    if failed:
+        print(f"  {len(failed)} failed - see: outbox, handoffs")
+    if upcoming_auto:
+        first = upcoming_auto[0]
+        first_booking = service.get_booking_by_id(first.booking_id)
+        due = "now" if first.send_after <= now else f"on {when(first.send_after)}"
+        print(f"  Next automatic: {first.kind.value} for {first_booking.reference} {due}")
+    if not (send_now or failed or upcoming_auto):
+        print("  No messages waiting.")
     return 0
+
+
+# --- The outbox: messages to customers --------------------------------------------------
+
+def command_outbox(ctx: Context, args: argparse.Namespace) -> int:
+    service, now = ctx.service, ctx.service.now()
+    messages = outbox.list_messages(service.db)
+    groups = [
+        ("SEND YOURSELF - DUE NOW", [m for m in messages
+                                     if m.status is OutboxStatus.SEND_YOURSELF and m.send_after <= now]),
+        ("SEND YOURSELF - LATER", [m for m in messages
+                                   if m.status is OutboxStatus.SEND_YOURSELF and m.send_after > now]),
+        ("WAITING FOR THE SENDER", [m for m in messages if m.status is OutboxStatus.PENDING]),
+        ("FAILED", [m for m in messages if m.status is OutboxStatus.FAILED]),
+    ]
+    if args.all:
+        groups += [("SENT", [m for m in messages if m.status is OutboxStatus.SENT]),
+                   ("CANCELLED", [m for m in messages if m.status is OutboxStatus.CANCELLED])]
+    shown = False
+    for title, group in groups:
+        if not group:
+            continue
+        shown = True
+        print(f"\n{title} ({len(group)})")
+        for message in group:
+            booking = service.get_booking_by_id(message.booking_id)
+            target = message.recipient if message.status is OutboxStatus.SEND_YOURSELF \
+                else f"{message.recipient} ({message.channel})"
+            print(f"  #{message.id:<3} {message.kind.value:<13} {booking.reference} {booking.customer_name}"
+                  f"  → {target}   {describe_message_state(message, now)}")
+            if title == "SEND YOURSELF - DUE NOW":
+                print("\n".join(f"        {line}" for line in message.text.splitlines()))
+                print(f"        → when sent: cozysetup-admin mark-sent {message.id}")
+            if title == "FAILED":
+                print(f"        → if you contacted the customer yourself: cozysetup-admin mark-sent {message.id}")
+    if not shown:
+        print("Nothing waiting or failed." if not args.all else "The outbox is empty.")
+    return 0
+
+
+def command_message(ctx: Context, args: argparse.Namespace) -> int:
+    message = outbox.get_message(ctx.service.db, args.number)
+    if message is None:
+        return fail(f"No message #{args.number}")
+    booking = ctx.service.get_booking_by_id(message.booking_id)
+    print(f"Message #{message.id} - {message.kind.value} for {booking.reference} ({booking.customer_name})")
+    print()
+    print(f"  To:          {message.recipient}  (channel: {message.channel})")
+    print(f"  Status:      {describe_message_state(message, ctx.service.now())}")
+    print(f"  Send from:   {when(message.send_after)}")
+    print(f"  Attempts:    {message.attempts}")
+    if message.last_error:
+        print(f"  Last error:  {message.last_error}")
+    if message.sent_at:
+        print(f"  Sent at:     {when(message.sent_at)}")
+    print()
+    print("  Text:")
+    print("\n".join(f"    {line}" for line in message.text.splitlines()))
+    return 0
+
+
+def command_mark_sent(ctx: Context, args: argparse.Namespace) -> int:
+    service = ctx.service
+    message = outbox.get_message(service.db, args.number)
+    if message is None:
+        return fail(f"No message #{args.number}")
+    booking = service.get_booking_by_id(message.booking_id)
+    if message.status not in outbox.OWNER_CAN_MARK_SENT:
+        reason = {OutboxStatus.PENDING: "the automatic sender handles it",
+                  OutboxStatus.SENT: "it was already sent",
+                  OutboxStatus.CANCELLED: "it was cancelled"}[message.status]
+        return fail(f"Message #{message.id} can't be marked as sent: {reason}")
+    if booking.status is not BookingStatus.CONFIRMED:
+        return fail(f"Message #{message.id} can't be marked as sent: {booking.reference} is {booking.status.value}")
+
+    lines = [f"Mark message #{message.id} as sent? ({message.kind.value} for {booking.reference}, "
+             f"{booking.customer_name}, to {message.recipient})"]
+    lines += [f"    {line}" for line in message.text.splitlines()]
+    if message.status is OutboxStatus.FAILED:
+        lines.append("  Automatic sending failed - you contacted the customer yourself. "
+                     "The handoff about it stays open until you resolve it.")
+    if message.send_after > service.now():
+        lines.append(f"  This {message.kind.value} is due {when(message.send_after)} - mark it as sent already?")
+    if not ctx.confirm(args, lines):
+        return 1
+    try:
+        outbox.mark_sent_by_owner(service, message.id, args.note)
+    except outbox.OutboxRefused as refused:
+        return fail(str(refused))
+    print(f"✓ Message #{message.id} marked as sent.")
+    return 0
+
+
+def report_confirmation_messages(ctx: Context, booking: Booking) -> None:
+    """After a booking is confirmed: say exactly what was queued for the customer."""
+    waiting = waiting_messages(ctx.service, booking)
+    confirmation = next((m for m in waiting if m.kind is OutboxKind.CONFIRMATION), None)
+    reminder = next((m for m in waiting if m.kind is OutboxKind.REMINDER), None)
+    if confirmation is None:
+        return
+    reminder_hour = format_time_en(outbox.reminder_time(ctx.show.info, booking).time())
+    if confirmation.status is OutboxStatus.SEND_YOURSELF:
+        if reminder:
+            print(f"📋 Send yourself: the confirmation now, and the reminder on {when_at(reminder.send_after)}, "
+                  f"to {confirmation.recipient}. See: cozysetup-admin outbox")
+        else:
+            print(f"📋 Send yourself: the confirmation now, to {confirmation.recipient} "
+                  f"(no reminder: confirmed after its time, {reminder_hour}). See: cozysetup-admin outbox")
+        return
+    print(f"✓ Confirmation queued for the customer ({confirmation.channel}) - it goes out with cozysetup-outbox.")
+    if reminder:
+        print(f"Reminder queued for {when(reminder.send_after)}.")
+    else:
+        print(f"No reminder: confirmed after its time ({reminder_hour}).")
+
+
+def waiting_messages(service: BookingService, booking: Booking) -> list:
+    return [m for m in outbox.messages_for(service.db, booking.id) if m.status in outbox.WAITING]
+
+
+def describe_message_state(message, now: datetime | None = None) -> str:
+    if message.status is OutboxStatus.PENDING:
+        retry = outbox.next_retry(message)
+        if retry:
+            return (f"waiting · attempt {message.attempts} failed: {message.last_error}, "
+                    f"next try {retry:%H:%M}")
+        if now is not None and message.send_after <= now:
+            return "waiting · due now"
+        return f"waiting · {when(message.send_after)}"
+    if message.status is OutboxStatus.SEND_YOURSELF:
+        if now is not None and message.send_after <= now:
+            return "send yourself · due now"
+        return f"send yourself · {when(message.send_after)}"
+    if message.status is OutboxStatus.SENT:
+        return f"sent · {when(message.sent_at)}" if message.sent_at else "sent"
+    if message.status is OutboxStatus.FAILED:
+        attempts = "1 attempt" if message.attempts == 1 else f"{message.attempts} attempts"
+        return f"failed after {attempts}: {message.last_error} (see handoffs)"
+    return f"cancelled · {message.last_error}" if message.last_error else "cancelled"
+
+
+def when(value: datetime) -> str:
+    """datetime -> "Thu 1 Oct, 3 PM"."""
+    return f"{value:%a} {value.day} {value:%b}, {format_time_en(value.time())}"
+
+
+def when_at(value: datetime) -> str:
+    """datetime -> "Thu 1 Oct at 3 PM"."""
+    return f"{value:%a} {value.day} {value:%b} at {format_time_en(value.time())}"
 
 
 def describe_handoff(ctx: Context, handoff: Handoff) -> str:
@@ -583,6 +779,14 @@ def build_parser() -> argparse.ArgumentParser:
     handoffs.add_argument("--all", action="store_true", help="include resolved handoffs")
     handoffs.set_defaults(handler=command_handoffs)
 
+    outbox_list = commands.add_parser("outbox", help="messages to customers: to send yourself, waiting, failed")
+    outbox_list.add_argument("--all", action="store_true", help="also sent and cancelled messages")
+    outbox_list.set_defaults(handler=command_outbox)
+
+    message = commands.add_parser("message", help="one message in full: exact text, recipient, status")
+    message.add_argument("number", type=int, help="the message number, e.g. 3")
+    message.set_defaults(handler=command_message)
+
     def acting(name: str, help_text: str, handler) -> argparse.ArgumentParser:
         command = commands.add_parser(name, help=help_text)
         command.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
@@ -607,6 +811,10 @@ def build_parser() -> argparse.ArgumentParser:
         command = acting(name, help_text, handler)
         command.add_argument("reference", help="e.g. CS-0001")
         command.add_argument("note", nargs="?", default="", help="optional note, kept in the history")
+
+    mark_sent = acting("mark-sent", "you sent a message to the customer yourself", command_mark_sent)
+    mark_sent.add_argument("number", type=int, help="the message number, e.g. 3")
+    mark_sent.add_argument("note", nargs="?", default="", help="optional note, e.g. \"sent on WhatsApp\"")
 
     resolve = acting("resolve", "mark a handoff as dealt with", command_resolve)
     resolve.add_argument("number", type=int, help="the handoff number, e.g. 3")

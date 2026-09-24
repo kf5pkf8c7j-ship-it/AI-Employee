@@ -264,7 +264,9 @@ def test_approve(service, db_path, capsys):
     assert "No screenshot was sent" in out
     assert "✓ CS-0001 confirmed" in out
     assert "CS-0002 (Sara) was waiting for the same date - flagged" in out
-    assert "has not been messaged" in out
+    assert "✓ Confirmation queued for the customer (terminal) - it goes out with cozysetup-outbox." in out
+    assert "Reminder queued for Thu 1 Oct, 3 PM." in out
+    assert "has not been messaged" not in out
     approval = [e for e in service.booking_history("CS-0001") if e["new_status"] == "confirmed"][-1]
     assert approval["details"] == "25 KWD received"
 
@@ -441,3 +443,254 @@ def test_overview_reminds_to_complete_past_setups(service, db_path, capsys):
     wednesday = lambda: datetime(2026, 9, 30, 10, 0, tzinfo=INFO.timezone)
     admin.main(["--db", str(db_path), "overview"], clock=wednesday)
     assert "Past setups to mark as completed: CS-0001" in capsys.readouterr().out
+
+
+# --- Step 6.4: messages to customers ------------------------------------------------------
+
+from cozysetup import outbox as outbox_module          # noqa: E402
+from cozysetup.database import OutboxStatus            # noqa: E402
+
+MONA = ["add", "--date", "2026-10-01", "--location", "bnaider", "--name", "Mona",
+        "--phone", "66666666", "--payment", "full"]
+
+
+def later(day, hour, minute=0):
+    moment = datetime(day.year, day.month, day.day, hour, minute, tzinfo=INFO.timezone)
+    return lambda: moment
+
+
+def outbox_row(service, number):
+    return outbox_module.get_message(service.db, number)
+
+
+# Truthful output after actions
+
+def test_approve_says_the_reminder_is_skipped_when_confirmed_after_its_time(service, db_path, capsys):
+    book(service, "Fahad", "55555555", booking_date=TUESDAY, choice="full")
+    code = admin.main(["--db", str(db_path), "approve", "CS-0001", "-y"], clock=later(TUESDAY, 16))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "✓ Confirmation queued for the customer (terminal) - it goes out with cozysetup-outbox." in out
+    assert "No reminder: confirmed after its time (3 PM)." in out
+
+
+def test_owner_paid_booking_says_send_yourself_with_the_phone(db_path, capsys):
+    assert act(db_path, "y", *MONA, "--paid")[0] == 0
+    assert ("📋 Send yourself: the confirmation now, and the reminder on Thu 1 Oct at 3 PM, "
+            "to +96566666666. See: cozysetup-admin outbox") in capsys.readouterr().out
+
+
+def test_owner_booking_approved_later_also_says_send_yourself(service, db_path, capsys):
+    act(db_path, "y", *MONA)                                    # waiting for payment: no messages yet
+    assert "Send yourself" not in capsys.readouterr().out
+    act(db_path, "y", "approve", "CS-0001")
+    assert "📋 Send yourself: the confirmation now" in capsys.readouterr().out
+
+
+def test_cancel_counts_the_cancelled_messages(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    act(db_path, "y", "cancel", "CS-0001")
+    out = capsys.readouterr().out
+    assert "2 waiting messages cancelled. Tell the customer about the cancellation yourself." in out
+    assert "has not been messaged" not in out
+
+
+def test_cancel_of_a_waiting_booking_just_reminds_to_tell_the_customer(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    act(db_path, "y", "cancel", "CS-0001")
+    out = capsys.readouterr().out
+    assert "Tell the customer about the cancellation yourself." in out
+    assert "waiting message" not in out
+
+
+def test_reschedule_says_where_the_reminder_moved(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    act(db_path, "y", "reschedule", "CS-0001", "2026-10-08")
+    assert "Reminder moved to Thu 8 Oct, 3 PM. Tell the customer about the new date yourself." in (
+        capsys.readouterr().out)
+
+
+def test_reject_still_says_the_customer_was_not_messaged(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.attach_payment_proof("CS-0001", "99999999", b"\xff\xd8\xff" + bytes(50))
+    act(db_path, "y", "reject", "CS-0001")
+    assert "The customer has not been messaged" in capsys.readouterr().out
+
+
+# The outbox command
+
+def test_outbox_lists_messages_waiting_for_the_sender(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    run(db_path, "outbox")
+    out = capsys.readouterr().out
+    assert "WAITING FOR THE SENDER (2)" in out
+    assert "#1   confirmation  CS-0001 Ahmad  → Ahmad (terminal)   waiting · due now" in out
+    assert "#2   reminder      CS-0001 Ahmad  → Ahmad (terminal)   waiting · Thu 1 Oct, 3 PM" in out
+    assert "SEND YOURSELF" not in out and "FAILED" not in out
+    assert "Your booking CS-0001 is confirmed!" not in out     # full text only for send-yourself
+
+
+def test_outbox_send_yourself_due_now_and_later(service, db_path, capsys):
+    act(db_path, "y", "add", "--date", "2026-10-02", "--location", "bnaider", "--name", "Mona",
+        "--phone", "66666666", "--payment", "full", "--paid")
+    capsys.readouterr()
+    run(db_path, "outbox")
+    out = capsys.readouterr().out
+    assert "SEND YOURSELF - DUE NOW (1)" in out
+    assert "SEND YOURSELF - LATER (1)" in out
+    assert "#1   confirmation  CS-0001 Mona  → +96566666666   send yourself · due now" in out
+    assert "        Your booking CS-0001 is confirmed!" in out                   # full text, ready to copy
+    assert "        → when sent: cozysetup-admin mark-sent 1" in out
+    assert "#2   reminder      CS-0001 Mona  → +96566666666   send yourself · Fri 2 Oct, 3 PM" in out
+
+
+def test_outbox_shows_retrying_and_failed_messages(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    book(service, "Sara", "55555555", booking_date=date(2026, 10, 2))
+    service.approve_payment("CS-0001")
+    service.approve_payment("CS-0002")
+    with service.db:   # CS-0001's confirmation: attempt 1 failed; CS-0002's: failed after 3
+        service.db.execute("UPDATE outbox SET attempts = 1, last_error = 'network unreachable', "
+                           "updated_at = ? WHERE id = 1", (NOW.isoformat(),))
+        service.db.execute("UPDATE outbox SET status = 'failed', attempts = 3, "
+                           "last_error = 'network unreachable' WHERE id = 3")
+    run(db_path, "outbox")
+    out = capsys.readouterr().out
+    assert "waiting · attempt 1 failed: network unreachable, next try 14:05" in out
+    assert "FAILED (1)" in out
+    assert "failed after 3 attempts: network unreachable (see handoffs)" in out
+    assert "→ if you contacted the customer yourself: cozysetup-admin mark-sent 3" in out
+
+
+def test_outbox_hides_sent_and_cancelled_unless_all(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    service.cancel_booking("CS-0001")
+    run(db_path, "outbox")
+    assert "Nothing waiting or failed." in capsys.readouterr().out
+    run(db_path, "outbox", "--all")
+    out = capsys.readouterr().out
+    assert "CANCELLED (2)" in out
+
+
+def test_outbox_when_empty(db_path, capsys):
+    run(db_path, "outbox", "--all")
+    assert "The outbox is empty." in capsys.readouterr().out
+
+
+# One message in full
+
+def test_message_shows_everything(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    assert run(db_path, "message", "2") == 0
+    out = capsys.readouterr().out
+    assert "Message #2 - reminder for CS-0001 (Ahmad)" in out
+    assert "To:          Ahmad  (channel: terminal)" in out
+    assert "Send from:   Thu 1 Oct, 3 PM" in out
+    assert "    Reminder: your CozySetup booking is today at Julaia, from 6 PM to 11 PM." in out
+
+
+def test_message_unknown(db_path, capsys):
+    assert run(db_path, "message", "99") == 1
+    assert "No message #99" in capsys.readouterr().err
+
+
+# mark-sent
+
+def test_mark_sent_asks_first_then_records_it_as_sent_by_the_owner(service, db_path, capsys):
+    act(db_path, "y", *MONA, "--paid")
+    capsys.readouterr()
+    code, questions = act(db_path, "y", "mark-sent", "1", "sent on WhatsApp")
+    out = capsys.readouterr().out
+    assert (code, questions) == (0, ["Confirm? [y/N] "])
+    assert "Mark message #1 as sent? (confirmation for CS-0001, Mona, to +96566666666)" in out
+    assert "✓ Message #1 marked as sent." in out
+    assert outbox_row(service, 1).status is OutboxStatus.SENT
+    owner_entries = [(e["actor"], e["details"]) for e in service.booking_history("CS-0001") if e["actor"] == "owner"]
+    assert ("owner", "confirmation sent by the owner (sent on WhatsApp)") in owner_entries
+
+
+def test_mark_sent_answer_no_changes_nothing(service, db_path):
+    act(db_path, "y", *MONA, "--paid")
+    assert act(db_path, "", "mark-sent", "1")[0] == 1
+    assert outbox_row(service, 1).status is OutboxStatus.SEND_YOURSELF
+
+
+def test_mark_sent_early_reminder_says_when_it_is_due(service, db_path, capsys):
+    act(db_path, "y", *MONA, "--paid")
+    capsys.readouterr()
+    act(db_path, "y", "mark-sent", "2")
+    assert "This reminder is due Thu 1 Oct, 3 PM - mark it as sent already?" in capsys.readouterr().out
+
+
+def test_mark_sent_accepts_a_failed_message(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    with service.db:
+        service.db.execute("UPDATE outbox SET status = 'failed', attempts = 3 WHERE id = 1")
+    capsys.readouterr()
+    assert act(db_path, "y", "mark-sent", "1", "called them")[0] == 0
+    out = capsys.readouterr().out
+    assert "The handoff about it stays open until you resolve it." in out
+    assert outbox_row(service, 1).status is OutboxStatus.SENT
+    assert "confirmation sent by the owner after automatic sending failed (called them)" in [
+        e["details"] for e in service.booking_history("CS-0001")]
+
+
+@pytest.mark.parametrize(
+    ("prepare", "message"),
+    [
+        ("pending", "can't be marked as sent: the automatic sender handles it"),
+        ("sent", "can't be marked as sent: it was already sent"),
+        ("cancelled", "can't be marked as sent: it was cancelled"),
+    ],
+)
+def test_mark_sent_refused_before_asking(service, db_path, capsys, prepare, message):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    with service.db:
+        service.db.execute("UPDATE outbox SET status = ? WHERE id = 1", (prepare,))
+    assert act(db_path, "y", "mark-sent", "1") == (1, [])
+    assert message in capsys.readouterr().err
+
+
+def test_mark_sent_unknown_message(db_path, capsys):
+    assert act(db_path, "y", "mark-sent", "42") == (1, [])
+    assert "No message #42" in capsys.readouterr().err
+
+
+# overview and show
+
+def test_overview_shows_messages_needing_attention(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    act(db_path, "y", "add", "--date", "2026-10-02", "--location", "bnaider", "--name", "Mona",
+        "--phone", "66666666", "--payment", "full", "--paid")
+    with service.db:
+        service.db.execute("UPDATE outbox SET status = 'failed', attempts = 3 WHERE id = 1")
+    capsys.readouterr()
+    run(db_path, "overview")
+    out = capsys.readouterr().out
+    assert "  1 message(s) to send yourself now - see: outbox" in out
+    assert "  1 message(s) failed to send - see: outbox, handoffs" in out
+    assert "MESSAGES" in out
+    assert "  Next automatic: reminder for CS-0001 on Thu 1 Oct, 3 PM" in out
+
+
+def test_overview_without_messages(db_path, capsys):
+    run(db_path, "overview")
+    assert "  No messages waiting." in capsys.readouterr().out
+
+
+def test_show_lists_the_bookings_messages(service, db_path, capsys):
+    book(service, "Ahmad", "99999999")
+    service.approve_payment("CS-0001")
+    run(db_path, "show", "CS-0001")
+    out = capsys.readouterr().out
+    assert "  Messages:" in out
+    assert "#1   confirmation  waiting · due now" in out
+    assert "#2   reminder      waiting · Thu 1 Oct, 3 PM" in out

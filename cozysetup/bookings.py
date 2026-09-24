@@ -714,6 +714,10 @@ class BookingService:
         """Must run inside write_transaction()."""
         self._record_event(booking_id, Actor.SYSTEM, event, details=details)
 
+    def add_owner_history(self, booking_id: int, event: str, details: str) -> None:
+        """Must run inside write_transaction()."""
+        self._record_event(booking_id, Actor.OWNER, event, details=details)
+
     def add_system_handoff(self, booking: Booking, summary: str) -> int:
         """A handoff created by the system itself. Must run inside write_transaction()."""
         return self._insert_handoff(
