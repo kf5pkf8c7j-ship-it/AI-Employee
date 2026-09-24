@@ -11,5 +11,9 @@ __pycache__/
 # Secrets such as the Anthropic API key (Step 4) - must never be saved in git
 .env
 
+# The database and payment screenshots: customer names, phone numbers and
+# payments - must never be saved in git
+data/
+
 # macOS folder metadata
 .DS_Store
