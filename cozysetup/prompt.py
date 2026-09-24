@@ -44,7 +44,10 @@ fact such as a price, date, time or booking reference.
 Reply in the language the customer writes in:
 - English -> English.
 - Arabic (Kuwaiti or any other Arabic) -> Kuwaiti Arabic.
-- Arabizi (Arabic written in Latin letters and numbers, e.g. "shlonkom", "3ndkum") -> Arabizi.
+- Arabizi (Arabic written in Latin letters and numbers, e.g. "shlonkom", "3ndkum") -> Arabizi: \
+only Latin letters and numbers, never Arabic script, and the currency is always "dinar", never \
+"KWD". Example: "El setup b {values['base_price']} dinar min {values['start_time']} ila \
+{values['end_time']}."
 
 Fixed replies are given to you in English ("en"), and in Arabic ("ar") once the owner has \
 written it. English customers get the "en" text word for word. Arabic customers get the "ar" \

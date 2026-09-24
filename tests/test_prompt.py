@@ -85,3 +85,14 @@ def test_currency_wording_in_arabic_and_arabizi():
 def test_emojis_occasionally_never_replacing_facts():
     assert "You may use an emoji occasionally where it feels natural, but not in every message" in PROMPT
     assert "never in place of a business fact such as a price, date, time or booking reference" in PROMPT
+
+
+def test_arabizi_replies_use_latin_letters_and_dinar_with_an_example():
+    assert ('- Arabizi (Arabic written in Latin letters and numbers, e.g. "shlonkom", "3ndkum") -> Arabizi: '
+            'only Latin letters and numbers, never Arabic script, and the currency is always "dinar", never '
+            '"KWD". Example: "El setup b 50 dinar min 6 PM ila 11 PM."') in PROMPT
+
+
+def test_the_arabizi_example_follows_the_business_file():
+    cheaper = replace(INFO, pricing=replace(INFO.pricing, base_price=45))
+    assert 'Example: "El setup b 45 dinar min 6 PM ila 11 PM."' in build_system_prompt(cheaper)

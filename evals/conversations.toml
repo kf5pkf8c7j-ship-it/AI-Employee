@@ -340,7 +340,7 @@ customer = ["shlonkum, 3ndkum setup? cham el si3r?"]
 no_tools = true
 new_bookings = 0
 reply_script = "latin"
-replies_contain = ["dinar", "50"]
+replies_contain = ["dinar", "50", "10"]
 replies_never_contain = ["KWD"]
 
 
