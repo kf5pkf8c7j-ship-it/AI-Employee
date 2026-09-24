@@ -1,0 +1,298 @@
+# CozySetup.kw - business information
+#
+# This is the single source of truth for CozySetup's business facts.
+# Edit this file to change prices, locations, policies or replies;
+# the whole system reads from here.
+#
+# Money amounts are whole Kuwaiti Dinars (KWD). Times use 24-hour format.
+
+
+[business]
+name = "CozySetup.kw"
+
+# All dates and times ("today", "tomorrow", 6 PM) mean Kuwait time,
+# wherever the computer running the system is located.
+timezone = "Asia/Kuwait"
+
+
+[pricing]
+currency = "KWD"
+
+# The standard booking: 6 PM to 11 PM.
+# The price stays the same even if the customer stays for a shorter time.
+base_price = 50
+start_time = 18:00:00
+end_time = 23:00:00
+
+# Only quoted in the price reply. The AI never offers, calculates or records
+# extra hours - the owner handles them during the setup.
+extra_hour_price = 10
+
+# Refundable. Paid on the booking day, separate from the rental price.
+# NOT a limit on damage costs.
+security_deposit = 20
+
+
+[payment]
+# "Days ahead" = booking date minus today's date, in calendar days (Kuwait time).
+#   Today    (0 days ahead) -> not booked by the AI; handed to the owner.
+#   Tomorrow (1 day ahead)  -> 100% of the rental price is required.
+#   2 or more days ahead    -> the customer chooses 100% or the deposit below.
+# The choice and amounts are fixed when the booking is created and are never
+# recalculated later, even if the customer pays on a different day.
+deposit_percent = 50
+deposit_min_days_ahead = 2
+
+# Paid on the booking day, when the customer arrives:
+#   - the remaining rental amount (if they paid the deposit)
+#   - the security deposit (see [pricing])
+
+[payment.wamd]
+# Exactly what customers should see to pay via Wamd (e.g. the number and name
+# to transfer to). EMPTY = not provided yet by the owner.
+details = ""
+
+
+# ---------------------------------------------------------------------------
+# Locations
+#
+# Each [[locations]] block is one location. The order here is the order
+# customers see when the AI lists the locations.
+#
+#   id       - permanent internal name. Bookings store this. Never change it
+#              once bookings exist (you CAN change the names shown to customers).
+#   name     - OFFICIAL customer-facing names (English and Arabic),
+#              approved by the owner.
+#   aliases  - NOT official names. Other spellings customers may type, used
+#              only to recognise the location. Never shown to customers.
+# ---------------------------------------------------------------------------
+
+[[locations]]
+id = "julaia"
+name = { en = "Julaia", ar = "الجليعة" }
+# Arifjan (Julaia Desert) is the same place - one location, not two.
+aliases = [
+    "Arifjan", "Arifjan (Julaia Desert)", "Julaia Desert", "Jlei'a",
+    "عريفجان", "بر الجليعة", "جليعة",
+    "jlei3a", "jlai3a", "3rifjan", "3reefjan",
+]
+
+[[locations]]
+id = "bnaider"
+name = { en = "Bnaider", ar = "بنيدر" }
+aliases = ["Bneider", "Bnaidar", "bnaidir", "bneidr"]
+
+[[locations]]
+id = "sulaibikhat_desert"
+name = { en = "Sulaibikhat Desert", ar = "الصليبيخات" }
+aliases = ["Sulaibikhat", "Slaibikhat", "صليبيخات"]
+
+[[locations]]
+id = "qarayen_markets"
+name = { en = "Qarayen Markets Area", ar = "أسواق القرين" }
+aliases = ["Qurain Markets", "Qurain", "Qarayen", "القرين", "grain", "gurain", "aswaq el grain"]
+
+[[locations]]
+id = "al_siddeeq"
+name = { en = "Al-Siddeeq", ar = "الصديق" }
+aliases = ["Siddeeq", "Siddiq", "Al Siddiq", "صديق", "siddeeg", "sideeg"]
+
+[[locations]]
+id = "al_subiya"
+name = { en = "Al-Subiya", ar = "الصبية" }
+aliases = ["Subiya", "Subbiya", "Sabiya", "صبية", "sbeya", "sbiya"]
+
+
+# ---------------------------------------------------------------------------
+# Included items - everything that comes with the setup.
+#
+# The order here is the order customers see.
+#   en - official English wording (from the owner).
+#   ar - official Arabic wording. EMPTY = not provided yet by the owner.
+#        The system will warn about every empty translation.
+# ---------------------------------------------------------------------------
+
+[setup]
+included_items = [
+    { en = "Floor seating for 8–10 people", ar = "" },
+    { en = "One carton of water", ar = "" },
+    { en = "Dallah and one carton of charcoal", ar = "" },
+    { en = "Tea and coffee", ar = "" },
+    { en = "Lighting and decorations", ar = "" },
+    { en = "Flashlight", ar = "" },
+    { en = "Wind barrier", ar = "" },
+    { en = "Projector", ar = "" },
+    { en = "Speakers", ar = "" },
+    { en = "Water container for washing", ar = "" },
+    { en = "Games", ar = "" },
+    { en = "Mirror", ar = "" },
+]
+
+
+# ---------------------------------------------------------------------------
+# Policies - what the AI tells customers.
+#
+# Only customer-facing wording lives here. How the AI BEHAVES (e.g. handing
+# cancellations to the owner, never judging the weather, never estimating
+# damage) is set in the AI's instructions, not in this file.
+#
+#   en - official English wording.
+#   ar - official Arabic wording. EMPTY = not provided yet by the owner.
+#
+# Text in {curly braces} is filled in automatically from the sections above,
+# e.g. {security_deposit} and {currency} come from [pricing].
+# ---------------------------------------------------------------------------
+
+[policies.cancellation]
+en = "You can cancel your booking up to one day before the booking date. If you cancel in time, you will receive a full refund."
+ar = ""
+
+[policies.rescheduling]
+en = "You can change your booking to another date, as long as the new date is available."
+ar = ""
+
+[policies.weather]
+en = "If the weather is bad, you can choose to postpone or cancel your booking. If you postpone, the full amount you have already paid carries over to the new available date."
+ar = ""
+
+[policies.security_deposit]
+en = "A {security_deposit} {currency} security deposit is paid on the booking day, separate from the rental price. It is returned in full after the equipment is inspected and confirmed to be undamaged. If there is damage, the deposit may be used to cover it."
+ar = ""
+
+
+# ---------------------------------------------------------------------------
+# Languages
+#
+# The AI replies in the customer's language:
+#   English        -> the "en" wording in this file, word for word.
+#   Kuwaiti Arabic -> the "ar" wording in this file, word for word.
+#   Arabizi        -> NOT stored in this file. The AI writes it from the
+#                     Arabic ("ar") wording, following the rule below.
+# ---------------------------------------------------------------------------
+
+[languages]
+arabizi_source = "ar"
+arabizi_rule = "When writing Arabizi from the Arabic wording, keep every fixed fact exactly the same: prices, amounts, currency, dates, times, booking references and booking status. Do not add, remove, round or change any of them."
+
+
+# ---------------------------------------------------------------------------
+# Fixed replies - the exact messages the AI sends. Used word for word.
+#
+#   en - official English wording (approved by the owner).
+#   ar - official Arabic wording. EMPTY = not provided yet by the owner.
+#
+# Text in {curly braces} is filled in automatically:
+#   from this file:    {base_price} {extra_hour_price} {security_deposit}
+#                      {currency} {start_time} {end_time} {deposit_percent}
+#                      {location_list} {wamd_details}
+#   from the booking:  {reference} {location} {date} {name} {phone}
+#                      {rental_price} {amount_now} {deposit_amount}
+#                      {remaining_amount} {due_on_day}
+#
+# Text inside """triple quotes""" can span several lines; the line breaks
+# are kept in the message.
+# ---------------------------------------------------------------------------
+
+# --- Answering questions ---------------------------------------------------
+
+[replies.price]
+en = "The camping setup is {base_price} {currency} from {start_time} to {end_time}. Each additional hour is {extra_hour_price} {currency}, and everything is included."
+ar = ""
+
+[replies.locations]
+en = """
+Our locations are:
+{location_list}"""
+ar = ""
+
+[replies.extra_hours]
+en = "The booking is from {start_time} to {end_time}. Extra time can be discussed directly with the owner during the setup."
+ar = ""
+
+# --- The booking flow ------------------------------------------------------
+
+[replies.booking_question]
+en = "Which location do you want? What date?"
+ar = ""
+
+[replies.date_unavailable]
+en = "Sorry, the setup is not available on {date}. Please choose another date."
+ar = ""
+
+# Only offered when the booking is 2 or more days ahead (see [payment]).
+[replies.payment_choice]
+en = "You can pay the full amount ({rental_price} {currency}) now, or a {deposit_percent}% deposit ({deposit_amount} {currency}) now and the remaining {remaining_amount} {currency} on the booking day. Which do you prefer?"
+ar = ""
+
+[replies.ask_contact]
+en = "Please send your name and phone number."
+ar = ""
+
+[replies.booking_summary]
+en = """
+Please check your booking details:
+Location: {location}
+Date: {date}, {start_time} – {end_time}
+Rental price: {rental_price} {currency}
+Pay now via Wamd: {amount_now} {currency}
+Pay on the booking day: {due_on_day}
+Name: {name}
+Phone: {phone}
+
+Is everything correct? Reply "yes" to create your booking."""
+ar = ""
+
+[replies.booking_created]
+en = """
+Your booking {reference} has been created and is pending payment.
+Please transfer {amount_now} {currency} via Wamd to:
+{wamd_details}
+Then send a screenshot of the transfer here.
+Please note: the date is only secured once the owner verifies your payment."""
+ar = ""
+
+[replies.screenshot_received]
+en = "Thank you, we've received your screenshot. The owner will verify the payment, and you'll receive a confirmation once it's approved."
+ar = ""
+
+# --- After the owner approves the payment ----------------------------------
+
+[replies.booking_confirmed]
+en = """
+Your booking {reference} is confirmed!
+{location}, {date}, {start_time} – {end_time}.
+On the booking day, please pay: {due_on_day}."""
+ar = ""
+
+[replies.reminder]
+en = """
+Reminder: your CozySetup booking is today at {location}, from {start_time} to {end_time}.
+Please remember to pay on arrival: {due_on_day}."""
+ar = ""
+
+# --- What is due on the booking day -----------------------------------------
+# {due_on_day} in the replies above is filled with ONE of these two,
+# depending on whether the customer paid the deposit or the full amount.
+
+[replies.due_on_day_after_deposit]
+en = "{remaining_amount} {currency} remaining + {security_deposit} {currency} security deposit"
+ar = ""
+
+[replies.due_on_day_after_full_payment]
+en = "{security_deposit} {currency} security deposit"
+ar = ""
+
+# --- Handoffs to the owner -------------------------------------------------
+
+[replies.handoff]
+en = "I've passed your request to the owner, who will get back to you."
+ar = ""
+
+[replies.same_day]
+en = "Same-day bookings are handled by the owner directly. I've passed your request to the owner, who will get back to you."
+ar = ""
+
+# Booking status when the date was confirmed for another customer first.
+[replies.date_conflict_status]
+en = "The owner will contact you about your booking."
+ar = ""
