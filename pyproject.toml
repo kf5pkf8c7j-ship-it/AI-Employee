@@ -1,0 +1,6 @@
+[project]
+name = "cozysetup"
+version = "0.1.0"
+description = "CozySetup.kw AI employee (Version 1)"
+requires-python = ">=3.12"
+dependencies = []

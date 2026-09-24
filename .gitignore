@@ -1,0 +1,15 @@
+# Python's private project environment (created by uv, rebuilt any time)
+.venv/
+
+# Python's compiled-code cache (created automatically)
+__pycache__/
+*.pyc
+
+# Test tool cache
+.pytest_cache/
+
+# Secrets such as the Anthropic API key (Step 4) - must never be saved in git
+.env
+
+# macOS folder metadata
+.DS_Store
