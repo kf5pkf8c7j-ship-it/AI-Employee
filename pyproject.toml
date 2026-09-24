@@ -4,3 +4,13 @@ version = "0.1.0"
 description = "CozySetup.kw AI employee (Version 1)"
 requires-python = ">=3.12"
 dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# Tests live in tests/, and import the cozysetup package from the project folder.
+testpaths = ["tests"]
+pythonpath = ["."]

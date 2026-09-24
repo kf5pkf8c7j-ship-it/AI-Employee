@@ -223,6 +223,30 @@ def _read_texts(section: _Section) -> dict[str, Text]:
     return texts
 
 
+# --- Values for {placeholders} ------------------------------------------------------
+
+def file_values(info: BusinessInfo) -> dict[str, object]:
+    """The FILE_VALUES placeholders, ready to show to customers (English formatting)."""
+    return {
+        "base_price": info.pricing.base_price,
+        "extra_hour_price": info.pricing.extra_hour_price,
+        "security_deposit": info.pricing.security_deposit,
+        "currency": info.pricing.currency,
+        "start_time": format_time_en(info.pricing.start_time),
+        "end_time": format_time_en(info.pricing.end_time),
+        "deposit_percent": info.payment.deposit_percent,
+        "location_list": " · ".join(location.name.en for location in info.locations),
+        "wamd_details": info.payment.wamd_details,
+    }
+
+
+def format_time_en(value: time) -> str:
+    """18:00 -> "6 PM", 23:30 -> "11:30 PM", 00:00 -> "12 AM"."""
+    hour = value.hour % 12 or 12
+    minutes = f":{value.minute:02d}" if value.minute else ""
+    return f"{hour}{minutes} {'AM' if value.hour < 12 else 'PM'}"
+
+
 # --- Business rules ---------------------------------------------------------------
 # The file can have the right types and still make no business sense,
 # e.g. a negative price or one alias shared by two locations.
