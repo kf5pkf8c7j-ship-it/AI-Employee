@@ -702,6 +702,26 @@ class BookingService:
             conflicts=[self._get_booking_by_id(conflict.id) for conflict in conflicts],
         )
 
+    # --- Helpers for the outbox sender (no booking rules here) ----------------------------
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[None]:
+        """For other parts (the outbox sender) that must save several changes together."""
+        with self._write_transaction():
+            yield
+
+    def add_system_history(self, booking_id: int, event: str, details: str) -> None:
+        """Must run inside write_transaction()."""
+        self._record_event(booking_id, Actor.SYSTEM, event, details=details)
+
+    def add_system_handoff(self, booking: Booking, summary: str) -> int:
+        """A handoff created by the system itself. Must run inside write_transaction()."""
+        return self._insert_handoff(
+            HandoffType.OTHER, summary, Actor.SYSTEM,
+            customer_name=booking.customer_name, customer_phone=booking.customer_phone,
+            channel=booking.channel, channel_user_id=booking.channel_user_id, booking_id=booking.id,
+        )
+
     def _queue_confirmation_and_reminder(self, booking_id: int) -> None:
         """Must run inside a write transaction - the messages exist exactly when the confirmation does."""
         booking = self._get_booking_by_id(booking_id)

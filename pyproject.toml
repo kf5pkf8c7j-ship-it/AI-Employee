@@ -14,6 +14,7 @@ dependencies = [
 cozysetup-admin = "cozysetup.admin:main"
 cozysetup-chat = "cozysetup.chat:main"
 cozysetup-eval = "cozysetup.evals:main"
+cozysetup-outbox = "cozysetup.send_outbox:main"
 
 # How to install this project as a package. uv_build is uv's own builder;
 # module-root = "" because the cozysetup/ folder sits directly in the project.
