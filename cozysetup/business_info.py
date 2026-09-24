@@ -11,7 +11,7 @@ import re
 import string
 import tomllib
 from dataclasses import dataclass
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -238,6 +238,11 @@ def file_values(info: BusinessInfo) -> dict[str, object]:
         "location_list": " · ".join(location.name.en for location in info.locations),
         "wamd_details": info.payment.wamd_details,
     }
+
+
+def format_date_en(value: date) -> str:
+    """date(2026, 10, 1) -> "Thursday 1 October 2026"."""
+    return f"{value:%A} {value.day} {value:%B %Y}"
 
 
 def format_time_en(value: time) -> str:

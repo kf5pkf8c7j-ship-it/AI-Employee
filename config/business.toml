@@ -36,6 +36,7 @@ security_deposit = 20
 [payment]
 # "Days ahead" = booking date minus today's date, in calendar days (Kuwait time).
 #   Today    (0 days ahead) -> not booked by the AI; handed to the owner.
+#                              If the owner accepts it: 100% is required.
 #   Tomorrow (1 day ahead)  -> 100% of the rental price is required.
 #   2 or more days ahead    -> the customer chooses 100% or the deposit below.
 # The choice and amounts are fixed when the booking is created and are never

@@ -51,7 +51,7 @@ def show(info: BusinessInfo) -> str:
     lines.append(f"Security deposit:  {pricing.security_deposit} {currency} (refundable, paid on the booking day)")
 
     heading("Payment")
-    lines.append("Booked for today:  handed to the owner")
+    lines.append(f"Booked for today:  handed to the owner (if the owner accepts: 100% now, {pricing.base_price} {currency})")
     if payment.deposit_min_days_ahead > 1:
         last_full_day = payment.deposit_min_days_ahead - 1
         days = "1 day" if last_full_day == 1 else f"1–{last_full_day} days"

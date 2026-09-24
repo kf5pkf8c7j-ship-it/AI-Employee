@@ -75,10 +75,14 @@ def test_far_ahead_offers_deposit_or_full(info):
     assert payment_options(NEXT_MONTH, MONDAY, info.payment) == (PaymentChoice.DEPOSIT, PaymentChoice.FULL)
 
 
-@pytest.mark.parametrize("booking_date", [MONDAY, SUNDAY])
-def test_no_payment_options_for_same_day_or_past(info, booking_date):
-    with pytest.raises(ValueError, match="not bookable"):
-        payment_options(booking_date, MONDAY, info.payment)
+def test_same_day_requires_full_payment(info):
+    # Only the owner books same-day; the rule is 100%.
+    assert payment_options(MONDAY, MONDAY, info.payment) == (PaymentChoice.FULL,)
+
+
+def test_no_payment_options_for_a_past_date(info):
+    with pytest.raises(ValueError, match="has passed"):
+        payment_options(SUNDAY, MONDAY, info.payment)
 
 
 def test_payment_options_follow_the_file_setting():

@@ -31,6 +31,10 @@ from cozysetup.rules import (
 DEFAULT_PHONE_REGION = "KW"
 MAX_NAME_LENGTH = 100
 
+# The channel recorded for bookings the owner enters: the owner is in touch
+# with the customer directly.
+OWNER_CHANNEL = "owner"
+
 # Statuses that block the date for everyone else.
 BLOCKING_STATUSES = (BookingStatus.CONFIRMED, BookingStatus.COMPLETED)
 
@@ -130,6 +134,17 @@ class Booking:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+
+@dataclass(frozen=True)
+class BookingPreview:
+    """A booking request that passed every rule - not saved."""
+    booking_date: date
+    location_id: str
+    customer_name: str    # tidied
+    customer_phone: str   # international format
+    payment_choice: PaymentChoice
+    amounts: Amounts
 
 
 @dataclass(frozen=True)
@@ -235,11 +250,15 @@ class BookingService:
 
     # --- Availability ---------------------------------------------------------------
 
-    def check_availability(self, booking_date: date) -> Availability:
+    def check_availability(self, booking_date: date, *, for_owner: bool = False) -> Availability:
+        """Whether a date can be booked, and the payment choices for it.
+
+        Today is SAME_DAY (handed to the owner) - except for the owner, who may book it.
+        """
         window = date_window(booking_date, self.today())
         if window is DateWindow.PAST:
             return Availability(booking_date, DateStatus.PAST, {})
-        if window is DateWindow.SAME_DAY:
+        if window is DateWindow.SAME_DAY and not for_owner:
             return Availability(booking_date, DateStatus.SAME_DAY, {})
         if self._date_is_blocked(booking_date):
             return Availability(booking_date, DateStatus.TAKEN, {})
@@ -262,8 +281,42 @@ class BookingService:
         channel: str,
         channel_user_id: str,
     ) -> Booking:
-        """Create a PENDING_PAYMENT booking. Every rule is checked again here,
-        whatever was checked earlier in the conversation."""
+        """The AI creates a PENDING_PAYMENT booking for a customer. Every rule is
+        checked again here, whatever was checked earlier in the conversation.
+        Same-day bookings are refused - they are handed to the owner."""
+        booking_id, _ = self._create_booking(
+            booking_date=booking_date, location_id=location_id, customer_name=customer_name,
+            customer_phone=customer_phone, payment_choice=payment_choice,
+            channel=channel, channel_user_id=channel_user_id, actor=Actor.AI, paid=False,
+        )
+        return self._get_booking_by_id(booking_id)
+
+    def preview_booking(
+        self,
+        *,
+        booking_date: date,
+        location_id: str,
+        customer_name: str,
+        customer_phone: str,
+        payment_choice: str,
+    ) -> BookingPreview:
+        """Check a customer's booking request with every rule create_booking uses,
+        without saving anything. Used to show the customer a summary first."""
+        return self._check_request(
+            booking_date=booking_date, location_id=location_id, customer_name=customer_name,
+            customer_phone=customer_phone, payment_choice=payment_choice, for_owner=False,
+        )
+
+    def _check_request(
+        self,
+        *,
+        booking_date: date,
+        location_id: str,
+        customer_name: str,
+        customer_phone: str,
+        payment_choice: str,
+        for_owner: bool,
+    ) -> BookingPreview:
         if location_id not in {location.id for location in self.info.locations}:
             raise BookingRefused(RefusalReason.UNKNOWN_LOCATION, f"unknown location id {location_id!r}")
 
@@ -275,29 +328,74 @@ class BookingService:
         if phone is None:
             raise BookingRefused(RefusalReason.INVALID_PHONE, f"{customer_phone!r} is not a valid phone number")
 
+        availability = self.check_availability(booking_date, for_owner=for_owner)
+        if availability.status is not DateStatus.AVAILABLE:
+            reason = {
+                DateStatus.PAST: RefusalReason.PAST_DATE,
+                DateStatus.SAME_DAY: RefusalReason.SAME_DAY,
+                DateStatus.TAKEN: RefusalReason.DATE_TAKEN,
+            }[availability.status]
+            raise BookingRefused(reason, f"{booking_date} is not available ({availability.status})")
+
+        try:
+            choice = PaymentChoice(payment_choice)
+        except ValueError:
+            choice = None
+        if choice not in availability.options:
+            allowed = ", ".join(availability.options)
+            raise BookingRefused(
+                RefusalReason.PAYMENT_CHOICE_NOT_ALLOWED,
+                f"payment choice {payment_choice!r} is not allowed for {booking_date} (allowed: {allowed})",
+            )
+        return BookingPreview(booking_date, location_id, name, phone, choice, availability.options[choice])
+
+    def create_owner_booking(
+        self,
+        *,
+        booking_date: date,
+        location_id: str,
+        customer_name: str,
+        customer_phone: str,
+        payment_choice: str,
+        paid: bool = False,
+    ) -> Approval:
+        """The owner creates a booking (e.g. taken by phone, or a same-day booking).
+
+        Same rules as the AI's bookings, except that today is allowed (100% only).
+        paid=True means the owner has personally verified or received the payment:
+        the booking is confirmed straight away - with the same date checks and
+        conflict flagging as approve_payment(). It never bypasses validation.
+        """
+        booking_id, conflicts = self._create_booking(
+            booking_date=booking_date, location_id=location_id, customer_name=customer_name,
+            customer_phone=customer_phone, payment_choice=payment_choice,
+            channel=OWNER_CHANNEL, channel_user_id="", actor=Actor.OWNER, paid=paid,
+        )
+        return Approval(
+            booking=self._get_booking_by_id(booking_id),
+            conflicts=[self._get_booking_by_id(conflict.id) for conflict in conflicts],
+        )
+
+    def _create_booking(
+        self,
+        *,
+        booking_date: date,
+        location_id: str,
+        customer_name: str,
+        customer_phone: str,
+        payment_choice: str,
+        channel: str,
+        channel_user_id: str,
+        actor: Actor,
+        paid: bool,
+    ) -> tuple[int, list[Booking]]:
         with self._write_transaction():
             # Checked inside the transaction, so nobody can confirm the date in between.
-            availability = self.check_availability(booking_date)
-            if availability.status is not DateStatus.AVAILABLE:
-                reason = {
-                    DateStatus.PAST: RefusalReason.PAST_DATE,
-                    DateStatus.SAME_DAY: RefusalReason.SAME_DAY,
-                    DateStatus.TAKEN: RefusalReason.DATE_TAKEN,
-                }[availability.status]
-                raise BookingRefused(reason, f"{booking_date} is not available ({availability.status})")
-
-            try:
-                choice = PaymentChoice(payment_choice)
-            except ValueError:
-                choice = None
-            if choice not in availability.options:
-                allowed = ", ".join(availability.options)
-                raise BookingRefused(
-                    RefusalReason.PAYMENT_CHOICE_NOT_ALLOWED,
-                    f"payment choice {payment_choice!r} is not allowed for {booking_date} (allowed: {allowed})",
-                )
-
-            amounts = availability.options[choice]
+            preview = self._check_request(
+                booking_date=booking_date, location_id=location_id, customer_name=customer_name,
+                customer_phone=customer_phone, payment_choice=payment_choice, for_owner=actor is Actor.OWNER,
+            )
+            name, phone, choice, amounts = preview.customer_name, preview.customer_phone, preview.payment_choice, preview.amounts
             booking_id = self.db.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM bookings").fetchone()[0]
             now = self._timestamp()
             self.db.execute(
@@ -316,10 +414,18 @@ class BookingService:
                 ),
             )
             self._record_event(
-                booking_id, Actor.AI, "created",
+                booking_id, actor, "created",
                 new_status=BookingStatus.PENDING_PAYMENT, details=f"payment choice: {choice.value}",
             )
-        return self._get_booking_by_id(booking_id)
+
+            conflicts: list[Booking] = []
+            if paid:
+                booking = self._get_booking_by_id(booking_id)
+                self._change_status(
+                    booking, BookingStatus.CONFIRMED, Actor.OWNER, "created as paid: owner verified the payment"
+                )
+                conflicts = self._flag_conflicts(booking)
+        return booking_id, conflicts
 
     # --- Payment screenshots ------------------------------------------------------------
 
@@ -641,6 +747,10 @@ class BookingService:
             """,
             (reference.strip().upper(),),
         ).fetchall()
+
+    def get_booking_by_id(self, booking_id: int) -> Booking | None:
+        row = self.db.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        return Booking.from_row(row) if row else None
 
     def _get_booking_by_id(self, booking_id: int) -> Booking:
         return Booking.from_row(self.db.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone())

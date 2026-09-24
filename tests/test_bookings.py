@@ -599,3 +599,86 @@ def test_every_owner_action_leaves_no_open_transaction_even_when_refused(service
     with pytest.raises(BookingRefused):
         service.approve_payment("CS-0404")
     assert not db.in_transaction
+
+
+# --- Owner-created bookings (Piece 3.1) ----------------------------------------------------
+
+def owner_book(service, **changes):
+    request = {
+        "booking_date": THURSDAY, "location_id": "julaia", "customer_name": "Ahmad",
+        "customer_phone": "99999999", "payment_choice": "full",
+    }
+    request.update(changes)
+    return service.create_owner_booking(**request)
+
+
+def test_owner_booking_starts_as_pending_payment_by_default(service, db):
+    booking = owner_book(service).booking
+    assert booking.status is BookingStatus.PENDING_PAYMENT
+    assert booking.channel == "owner"
+    assert service.check_availability(THURSDAY).status is DateStatus.AVAILABLE  # not blocked yet
+    assert events(db, booking)[0]["actor"] == "owner"
+
+
+def test_owner_booking_marked_paid_is_confirmed_immediately(service, db):
+    booking = owner_book(service, paid=True).booking
+    assert booking.status is BookingStatus.CONFIRMED
+    assert service.check_availability(THURSDAY).status is DateStatus.TAKEN
+    assert [e["new_status"] for e in events(db, booking)] == ["pending_payment", "confirmed"]
+
+
+def test_owner_may_book_today_with_full_payment(service):
+    booking = owner_book(service, booking_date=MONDAY, paid=True).booking
+    assert booking.booking_date == MONDAY
+    assert booking.amounts == FULL_AMOUNTS
+
+
+def test_ai_still_cannot_book_today(service):
+    with pytest.raises(BookingRefused) as refused:
+        book(service, booking_date=MONDAY, payment_choice="full")
+    assert refused.value.reason is RefusalReason.SAME_DAY
+    assert service.check_availability(MONDAY).status is DateStatus.SAME_DAY
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"booking_date": MONDAY, "payment_choice": "deposit"}, RefusalReason.PAYMENT_CHOICE_NOT_ALLOWED),
+        ({"booking_date": TUESDAY, "payment_choice": "deposit"}, RefusalReason.PAYMENT_CHOICE_NOT_ALLOWED),
+        ({"booking_date": SUNDAY}, RefusalReason.PAST_DATE),
+        ({"location_id": "kabd"}, RefusalReason.UNKNOWN_LOCATION),
+        ({"customer_phone": "123"}, RefusalReason.INVALID_PHONE),
+        ({"customer_name": ""}, RefusalReason.INVALID_NAME),
+    ],
+)
+def test_paid_does_not_bypass_validation(service, db, changes, reason):
+    with pytest.raises(BookingRefused) as refused:
+        owner_book(service, paid=True, **changes)
+    assert refused.value.reason is reason
+    assert db.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 0
+
+
+def test_owner_may_choose_deposit_two_or_more_days_ahead(service):
+    booking = owner_book(service, payment_choice="deposit").booking
+    assert booking.amounts == DEPOSIT_AMOUNTS
+
+
+def test_paid_does_not_bypass_date_conflict_protection(service, db):
+    owner_book(service, paid=True)
+    with pytest.raises(BookingRefused) as refused:
+        owner_book(service, customer_name="Second", paid=True)
+    assert refused.value.reason is RefusalReason.DATE_TAKEN
+    assert db.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 1
+
+
+def test_paid_owner_booking_flags_waiting_bookings_like_an_approval(service):
+    book(service, customer_name="Waiting")          # CS-0001, pending, from the AI
+    result = owner_book(service, paid=True)         # CS-0002, confirmed
+    assert [b.reference for b in result.conflicts] == ["CS-0001"]
+    assert service.get_booking("CS-0001").date_conflict is True
+    assert service.list_handoffs()[0].type is HandoffType.DATE_CONFLICT
+
+
+def test_unpaid_owner_booking_is_approved_like_any_other(service):
+    owner_book(service)
+    assert service.approve_payment("CS-0001", "cash").booking.status is BookingStatus.CONFIRMED

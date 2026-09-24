@@ -4,8 +4,23 @@ version = "0.1.0"
 description = "CozySetup.kw AI employee (Version 1)"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=1.8.0",
     "phonenumbers>=9.0.39",
+    "python-dotenv>=1.2.3",
 ]
+
+# Commands installed by `uv sync`, e.g. `uv run cozysetup-admin pending`.
+[project.scripts]
+cozysetup-admin = "cozysetup.admin:main"
+
+# How to install this project as a package. uv_build is uv's own builder;
+# module-root = "" because the cozysetup/ folder sits directly in the project.
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
 
 [dependency-groups]
 dev = [

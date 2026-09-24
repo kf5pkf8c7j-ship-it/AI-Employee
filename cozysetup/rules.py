@@ -21,7 +21,7 @@ FILS_PER_KWD = 1000
 class DateWindow(StrEnum):
     """Where a booking date falls, before looking at other bookings."""
     PAST = "past"
-    SAME_DAY = "same_day"   # handed to the owner - never booked by the AI
+    SAME_DAY = "same_day"   # only the owner books it - the AI hands it over
     BOOKABLE = "bookable"   # tomorrow or later
 
 
@@ -61,10 +61,11 @@ def date_window(booking_date: date, today: date) -> DateWindow:
 def payment_options(booking_date: date, today: date, payment: Payment) -> tuple[PaymentChoice, ...]:
     """The payment choices the customer may pick for this date.
 
-    Booked far enough ahead: 50% deposit or full payment. Otherwise: full only.
+    Booked far enough ahead: 50% deposit or full payment. Otherwise - including
+    same-day bookings, which only the owner makes - full payment only.
     """
-    if date_window(booking_date, today) is not DateWindow.BOOKABLE:
-        raise ValueError(f"{booking_date} is not bookable when today is {today}")
+    if date_window(booking_date, today) is DateWindow.PAST:
+        raise ValueError(f"{booking_date} has passed (today is {today})")
     if days_ahead(booking_date, today) >= payment.deposit_min_days_ahead:
         return (PaymentChoice.DEPOSIT, PaymentChoice.FULL)
     return (PaymentChoice.FULL,)
