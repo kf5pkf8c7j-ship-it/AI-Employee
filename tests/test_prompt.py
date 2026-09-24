@@ -70,3 +70,18 @@ def test_booking_flow_creates_once_after_the_summary():
     assert "Call show_booking_summary and send the summary" in PROMPT
     assert "call create_booking once" in PROMPT
     assert "confirmed_by_customer" not in PROMPT
+
+
+def test_ambiguous_weekday_is_clarified_not_assumed():
+    assert "If the customer names today's weekday, don't assume whether they mean today or next week" in PROMPT
+    assert '"Do you mean today or next Thursday?" / "تقصد اليوم ولا الخميس الجاي؟"' in PROMPT
+
+
+def test_currency_wording_in_arabic_and_arabizi():
+    assert 'In Arabic replies, write the currency as "دينار" (not "د.ك" or "KWD")' in PROMPT
+    assert 'in Arabizi replies as "dinar"; keep every amount exactly the same.' in PROMPT
+
+
+def test_emojis_occasionally_never_replacing_facts():
+    assert "You may use an emoji occasionally where it feels natural, but not in every message" in PROMPT
+    assert "never in place of a business fact such as a price, date, time or booking reference" in PROMPT
