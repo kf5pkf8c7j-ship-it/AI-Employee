@@ -1,20 +1,22 @@
-"""The database: one SQLite file holding bookings, their history, and handoffs.
+"""The database: one SQLite file holding bookings, their history, handoffs,
+and the outbox of messages waiting to be sent to customers.
 
-connect() opens the file (creating it and its tables the first time) and
-returns a connection the booking service uses.
+connect() opens the file - creating it the first time, and upgrading an older
+file to the current table version - and returns a connection.
 """
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from enum import StrEnum
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cozysetup.db"
 
-# Bumped whenever the tables change, so an old database file is never used
-# with code that expects different tables.
-SCHEMA_VERSION = 1
+# The current table version. An older file is upgraded step by step with the
+# MIGRATIONS below; a newer one (made by newer code) is refused.
+SCHEMA_VERSION = 2
 
 
 # --- The values the database accepts ------------------------------------------
@@ -51,12 +53,35 @@ class HandoffStatus(StrEnum):
     RESOLVED = "resolved"
 
 
+class Language(StrEnum):
+    """The language a customer writes in."""
+    ENGLISH = "en"
+    ARABIC = "ar"
+    ARABIZI = "arabizi"
+
+
+class OutboxKind(StrEnum):
+    CONFIRMATION = "confirmation"
+    REMINDER = "reminder"
+
+
+class OutboxStatus(StrEnum):
+    PENDING = "pending"              # waiting for its send time / to be sent
+    SEND_YOURSELF = "send_yourself"  # no automatic channel: the owner sends it
+    SENT = "sent"
+    FAILED = "failed"                # gave up after retries - the owner was told
+    CANCELLED = "cancelled"          # no longer needed (booking cancelled or moved)
+
+
 # --- The tables -----------------------------------------------------------------
 # STRICT: SQLite refuses values of the wrong type (e.g. text in a number column).
 # Money is in fils (1 KWD = 1000 fils). Dates are "2026-10-01"; times are
 # Kuwait time, e.g. "2026-09-28T14:02:00+03:00".
+#
+# A new database is built exactly like an upgraded one: the version 1 tables
+# first, then every migration in order. So new and upgraded files can never differ.
 
-SCHEMA = """
+SCHEMA_V1 = """
 CREATE TABLE bookings (
     id                INTEGER PRIMARY KEY,
     reference         TEXT    NOT NULL UNIQUE,     -- CS-0001
@@ -116,36 +141,100 @@ CREATE TABLE handoffs (
 ) STRICT;
 """
 
+# Each migration takes the database from the previous version to this one.
+MIGRATIONS = {
+    2: """
+-- The customer's language, so messages can later use the owner's approved
+-- Arabic wording. Empty (NULL) for bookings made before it was recorded.
+ALTER TABLE bookings ADD COLUMN language TEXT CHECK (language IN ('en', 'ar', 'arabizi'));
+
+-- Messages the system sends to customers by itself (not replies in a chat).
+CREATE TABLE outbox (
+    id           INTEGER PRIMARY KEY,
+    booking_id   INTEGER NOT NULL REFERENCES bookings (id),
+    kind         TEXT    NOT NULL CHECK (kind IN ('confirmation', 'reminder')),
+    channel      TEXT    NOT NULL,                 -- where to send it, e.g. terminal, owner
+    recipient    TEXT    NOT NULL,                 -- who on that channel
+    language     TEXT    NOT NULL CHECK (language IN ('en', 'ar', 'arabizi')),
+    text         TEXT    NOT NULL,                 -- the exact message, filled in when queued
+    send_after   TEXT    NOT NULL,                 -- Kuwait time; not sent before this
+    status       TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN
+                     ('pending', 'send_yourself', 'sent', 'failed', 'cancelled')),
+    attempts     INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error   TEXT,
+    created_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    sent_at      TEXT
+) STRICT;
+
+-- Safety net: never two waiting messages of the same kind for one booking
+-- (e.g. two reminders). Sent and cancelled ones don't count.
+CREATE UNIQUE INDEX one_waiting_message_per_kind
+    ON outbox (booking_id, kind) WHERE status IN ('pending', 'send_yourself');
+
+-- Finding the messages that are due, quickly.
+CREATE INDEX outbox_due ON outbox (status, send_after);
+""",
+}
+
 
 class DatabaseError(Exception):
     """The database file cannot be used by this version of the code."""
 
 
 def connect(path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Open the database, creating the file and tables the first time.
+    """Open the database: create it the first time, upgrade an older one.
 
-    Pass ":memory:" for a temporary database that disappears when closed (tests).
+    Before upgrading a database file, a copy is saved next to it
+    (e.g. cozysetup.db.before-v2.bak). Pass ":memory:" for a temporary
+    database that disappears when closed (tests).
     """
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row             # rows readable by column name
-    connection.execute("PRAGMA foreign_keys = ON")   # refuse events for bookings that don't exist
+    connection.execute("PRAGMA foreign_keys = ON")   # refuse rows pointing at bookings that don't exist
     connection.execute("PRAGMA busy_timeout = 5000") # wait up to 5s if another part is writing
 
-    version = connection.execute("PRAGMA user_version").fetchone()[0]
-    if version == 0:
-        try:
-            # One transaction: all tables are created, or none.
-            connection.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-        except sqlite3.Error:
-            connection.rollback()
-            connection.close()
-            raise
-    elif version != SCHEMA_VERSION:
+    try:
+        version = _version(connection)
+        if version > SCHEMA_VERSION:
+            raise DatabaseError(
+                f"{path} has table version {version}, but this code only knows up to "
+                f"version {SCHEMA_VERSION} - it was made by newer code"
+            )
+        if version == 0:
+            _run(connection, SCHEMA_V1, new_version=1)
+            version = 1
+        elif version < SCHEMA_VERSION and path != ":memory:":
+            _back_up(connection, Path(path))
+        while version < SCHEMA_VERSION:
+            version += 1
+            _run(connection, MIGRATIONS[version], new_version=version)
+    except BaseException:
         connection.close()
-        raise DatabaseError(
-            f"{path} has table version {version}, but this code expects version {SCHEMA_VERSION}"
-        )
+        raise
     return connection
+
+
+def _version(connection: sqlite3.Connection) -> int:
+    return connection.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _run(connection: sqlite3.Connection, sql: str, *, new_version: int) -> None:
+    """One step in one transaction: all its changes and the new version number, or nothing."""
+    try:
+        connection.executescript(f"BEGIN; {sql} PRAGMA user_version = {new_version}; COMMIT;")
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+def _back_up(connection: sqlite3.Connection, path: Path) -> Path:
+    """Copy the file before upgrading it, so nothing is lost if anything goes wrong."""
+    backup = path.with_name(f"{path.name}.before-v{SCHEMA_VERSION}.bak")
+    if not backup.exists():
+        connection.execute("PRAGMA wal_checkpoint")   # make sure the file on disk is complete
+        shutil.copy2(path, backup)
+    return backup

@@ -265,7 +265,8 @@ def test_approve(service, db_path, capsys):
     assert "✓ CS-0001 confirmed" in out
     assert "CS-0002 (Sara) was waiting for the same date - flagged" in out
     assert "has not been messaged" in out
-    assert service.booking_history("CS-0001")[-1]["details"] == "25 KWD received"
+    approval = [e for e in service.booking_history("CS-0001") if e["new_status"] == "confirmed"][-1]
+    assert approval["details"] == "25 KWD received"
 
 
 def test_approve_refused_before_asking_when_date_is_taken(service, db_path, capsys):

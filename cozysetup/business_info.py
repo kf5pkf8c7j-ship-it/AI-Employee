@@ -87,6 +87,11 @@ class Payment:
 
 
 @dataclass(frozen=True)
+class Reminders:
+    hours_before_start: int
+
+
+@dataclass(frozen=True)
 class Location:
     id: str
     name: Text
@@ -99,6 +104,7 @@ class BusinessInfo:
     timezone: ZoneInfo
     pricing: Pricing
     payment: Payment
+    reminders: Reminders
     locations: tuple[Location, ...]
     included_items: tuple[Text, ...]
     policies: dict[str, Text]
@@ -159,6 +165,10 @@ def _read_business_info(root: _Section) -> BusinessInfo:
     wamd.done()
     payment.done()
 
+    reminders = root.section("reminders")
+    reminders_info = Reminders(hours_before_start=reminders.value("hours_before_start", int))
+    reminders.done()
+
     locations = tuple(_read_location(item) for item in root.list_of_sections("locations"))
 
     setup = root.section("setup")
@@ -181,6 +191,7 @@ def _read_business_info(root: _Section) -> BusinessInfo:
         timezone=timezone,
         pricing=pricing_info,
         payment=payment_info,
+        reminders=reminders_info,
         locations=locations,
         included_items=included_items,
         policies=policies,
@@ -262,6 +273,10 @@ def _check_rules(info: BusinessInfo) -> list[str]:
         problems.append("[business]: 'name' is empty")
     _check_pricing(info.pricing, problems)
     _check_payment(info.payment, problems)
+    if not 1 <= info.reminders.hours_before_start <= 12:
+        problems.append(
+            f"[reminders]: 'hours_before_start' must be between 1 and 12, not {info.reminders.hours_before_start}"
+        )
     _check_locations(info.locations, problems)
     _check_included_items(info.included_items, problems)
     _check_policies(info.policies, problems)

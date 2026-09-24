@@ -61,6 +61,10 @@ def test_payment_rules(info):
     assert info.payment.deposit_min_days_ahead == 2
 
 
+def test_reminders_three_hours_before_the_start(info):
+    assert info.reminders.hours_before_start == 3
+
+
 def test_exactly_the_six_official_locations_in_order(info):
     assert [(loc.id, loc.name.en, loc.name.ar) for loc in info.locations] == [
         ("julaia", "Julaia", "الجليعة"),
@@ -138,6 +142,9 @@ def test_security_deposit_policy_does_not_mention_a_limit(info):
         ("end_time = 23:00:00", "end_time = 17:00:00", "must be before 'end_time'"),
         ("deposit_percent = 50", "deposit_percent = 150", "'deposit_percent' must be between 1 and 99"),
         ("deposit_min_days_ahead = 2", "deposit_min_days_ahead = 0", "must be 1 or more"),
+        ("hours_before_start = 3", "hours_before_start = 0", "'hours_before_start' must be between 1 and 12"),
+        ("hours_before_start = 3", 'hours_before_start = "3"', "'hours_before_start' should be a whole number"),
+        ("[reminders]\n", "", "unexpected 'hours_before_start'"),
         ('aliases = ["Bneider"', 'aliases = ["Qurain"', "'Qurain' also belongs to location 'bnaider'"),
         ('id = "al_subiya"', 'id = "julaia"', "id 'julaia' is used by more than one location"),
         ('id = "al_subiya"', 'id = "Al Subiya"', "id 'Al Subiya' must be lowercase"),

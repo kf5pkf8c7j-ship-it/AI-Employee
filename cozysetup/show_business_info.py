@@ -62,6 +62,10 @@ def show(info: BusinessInfo) -> str:
     )
     lines.append(f"Wamd details:      {payment.wamd_details or NOT_PROVIDED}")
 
+    heading("Reminders")
+    lines.append(f"Confirmed bookings get a reminder {info.reminders.hours_before_start} hours before "
+                 f"{values['start_time']} (none if confirmed after that).")
+
     heading(f"Locations ({len(info.locations)})")
     for number, location in enumerate(info.locations, start=1):
         lines.append(f"{number}. {location.name.en} — {location.name.ar}   [id: {location.id}]")

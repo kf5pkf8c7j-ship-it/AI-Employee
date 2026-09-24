@@ -17,7 +17,8 @@ from pathlib import Path
 import phonenumbers
 
 from cozysetup.business_info import BusinessInfo
-from cozysetup.database import DEFAULT_DB_PATH, Actor, BookingStatus, HandoffStatus, HandoffType
+from cozysetup import outbox
+from cozysetup.database import DEFAULT_DB_PATH, Actor, BookingStatus, HandoffStatus, HandoffType, Language, OutboxKind
 from cozysetup.rules import (
     Amounts,
     DateWindow,
@@ -33,7 +34,7 @@ MAX_NAME_LENGTH = 100
 
 # The channel recorded for bookings the owner enters: the owner is in touch
 # with the customer directly.
-OWNER_CHANNEL = "owner"
+OWNER_CHANNEL = outbox.OWNER_CHANNEL
 
 # Statuses that block the date for everyone else.
 BLOCKING_STATUSES = (BookingStatus.CONFIRMED, BookingStatus.COMPLETED)
@@ -71,6 +72,7 @@ class RefusalReason(StrEnum):
     BOOKING_NOT_FOUND = "booking_not_found"
     WRONG_STATUS = "wrong_status"
     INVALID_FILE = "invalid_file"
+    INVALID_LANGUAGE = "invalid_language"
     TOO_EARLY = "too_early"
     HANDOFF_NOT_FOUND = "handoff_not_found"
 
@@ -109,6 +111,7 @@ class Booking:
     payment_proof: str | None
     created_at: datetime
     updated_at: datetime
+    language: Language | None = None   # the customer's language; None = not recorded
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Booking:
@@ -133,6 +136,7 @@ class Booking:
             payment_proof=row["payment_proof"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            language=Language(row["language"]) if row["language"] else None,
         )
 
 
@@ -280,14 +284,17 @@ class BookingService:
         payment_choice: str,
         channel: str,
         channel_user_id: str,
+        language: str | None = None,
     ) -> Booking:
         """The AI creates a PENDING_PAYMENT booking for a customer. Every rule is
         checked again here, whatever was checked earlier in the conversation.
-        Same-day bookings are refused - they are handed to the owner."""
+        Same-day bookings are refused - they are handed to the owner.
+        `language` is the language the customer writes in: en, ar or arabizi."""
         booking_id, _ = self._create_booking(
             booking_date=booking_date, location_id=location_id, customer_name=customer_name,
             customer_phone=customer_phone, payment_choice=payment_choice,
             channel=channel, channel_user_id=channel_user_id, actor=Actor.AI, paid=False,
+            language=language,
         )
         return self._get_booking_by_id(booking_id)
 
@@ -388,7 +395,13 @@ class BookingService:
         channel_user_id: str,
         actor: Actor,
         paid: bool,
+        language: str | None = None,
     ) -> tuple[int, list[Booking]]:
+        try:
+            customer_language = Language(language) if language else None
+        except ValueError:
+            raise BookingRefused(RefusalReason.INVALID_LANGUAGE,
+                                 f"language must be en, ar or arabizi, not {language!r}") from None
         with self._write_transaction():
             # Checked inside the transaction, so nobody can confirm the date in between.
             preview = self._check_request(
@@ -403,14 +416,15 @@ class BookingService:
                 INSERT INTO bookings (
                     id, reference, booking_date, location_id, customer_name, customer_phone,
                     channel, channel_user_id, payment_choice, rental_price, amount_now,
-                    remaining_on_day, security_deposit, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    remaining_on_day, security_deposit, status, created_at, updated_at, language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     booking_id, format_reference(booking_id), booking_date.isoformat(), location_id,
                     name, phone, channel, channel_user_id, choice.value, amounts.rental_price,
                     amounts.amount_now, amounts.remaining_on_day, amounts.security_deposit,
                     BookingStatus.PENDING_PAYMENT.value, now, now,
+                    customer_language.value if customer_language else None,
                 ),
             )
             self._record_event(
@@ -425,6 +439,7 @@ class BookingService:
                     booking, BookingStatus.CONFIRMED, Actor.OWNER, "created as paid: owner verified the payment"
                 )
                 conflicts = self._flag_conflicts(booking)
+                self._queue_confirmation_and_reminder(booking_id)
         return booking_id, conflicts
 
     # --- Payment screenshots ------------------------------------------------------------
@@ -612,6 +627,7 @@ class BookingService:
             self._change_status(booking, BookingStatus.CONFIRMED, Actor.OWNER, note)
             self._set_date_conflict(booking.id, False)  # the owner has decided for this one
             conflicts = self._flag_conflicts(booking)
+            self._queue_confirmation_and_reminder(booking.id)
         return Approval(
             booking=self._get_booking_by_id(booking.id),
             conflicts=[self._get_booking_by_id(conflict.id) for conflict in conflicts],
@@ -633,6 +649,7 @@ class BookingService:
         with self._write_transaction():
             booking = self._require_booking(reference)
             self._change_status(booking, BookingStatus.CANCELLED, Actor.OWNER, note)
+            self._cancel_waiting_messages(booking.id, "booking cancelled")
         return self._get_booking_by_id(booking.id)
 
     def complete_booking(self, reference: str, note: str = "") -> Booking:
@@ -642,6 +659,7 @@ class BookingService:
             if booking.booking_date > self.today():
                 raise BookingRefused(RefusalReason.TOO_EARLY, f"{booking.reference} is not until {booking.booking_date}")
             self._change_status(booking, BookingStatus.COMPLETED, Actor.OWNER, note)
+            self._cancel_waiting_messages(booking.id, "booking completed")
         return self._get_booking_by_id(booking.id)
 
     def reschedule_booking(self, reference: str, new_date: date, note: str = "") -> Approval:
@@ -670,11 +688,32 @@ class BookingService:
             details = f"{booking.booking_date} -> {new_date}" + (f"; {note}" if note else "")
             self._record_event(booking.id, Actor.OWNER, "rescheduled", details=details)
             booking = self._get_booking_by_id(booking.id)
-            conflicts = self._flag_conflicts(booking) if booking.status is BookingStatus.CONFIRMED else []
+            conflicts = []
+            if booking.status is BookingStatus.CONFIRMED:
+                conflicts = self._flag_conflicts(booking)
+                # Waiting messages mention the old date: cancel them. The reminder is
+                # queued again for the new date; telling the customer about the move
+                # stays with the owner (no automatic reschedule message).
+                self._cancel_waiting_messages(booking.id, "booking rescheduled")
+                self._record_event(booking.id, Actor.SYSTEM, "outbox",
+                                   details=outbox.queue_reminder(self.db, self.info, booking, self.now()))
         return Approval(
             booking=self._get_booking_by_id(booking.id),
             conflicts=[self._get_booking_by_id(conflict.id) for conflict in conflicts],
         )
+
+    def _queue_confirmation_and_reminder(self, booking_id: int) -> None:
+        """Must run inside a write transaction - the messages exist exactly when the confirmation does."""
+        booking = self._get_booking_by_id(booking_id)
+        for done in outbox.queue_confirmation_and_reminder(self.db, self.info, booking, self.now()):
+            self._record_event(booking.id, Actor.SYSTEM, "outbox", details=done)
+
+    def _cancel_waiting_messages(self, booking_id: int, reason: str) -> None:
+        """Must run inside a write transaction."""
+        cancelled = outbox.cancel_waiting(self.db, booking_id, self.now())
+        if cancelled:
+            self._record_event(booking_id, Actor.SYSTEM, "outbox",
+                               details=f"{cancelled} waiting message(s) cancelled: {reason}")
 
     def _flag_conflicts(self, confirmed: Booking) -> list[Booking]:
         """Flag every other waiting booking on the confirmed booking's date, and hand

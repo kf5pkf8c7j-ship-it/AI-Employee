@@ -242,10 +242,12 @@ def test_format_reference():
 
 # --- Payment screenshots (Piece 2.4) --------------------------------------------------
 
-def events(db, booking):
-    return [dict(row) for row in db.execute(
+def events(db, booking, *, with_outbox=False):
+    """The booking's history. The outbox's own entries are left out unless asked for."""
+    rows = [dict(row) for row in db.execute(
         "SELECT actor, event, old_status, new_status FROM booking_events WHERE booking_id = ? ORDER BY id",
         (booking.id,))]
+    return rows if with_outbox else [row for row in rows if row["event"] != "outbox"]
 
 
 def test_screenshot_moves_booking_to_payment_submitted(service, db):
@@ -572,7 +574,8 @@ def test_booking_history_tells_the_whole_story(service):
     book(service)
     service.attach_payment_proof("CS-0001", "99999999", JPG)
     service.approve_payment("CS-0001", "received")
-    story = [(row["actor"], row["event"], row["new_status"]) for row in service.booking_history("CS-0001")]
+    story = [(row["actor"], row["event"], row["new_status"])
+             for row in service.booking_history("CS-0001") if row["event"] != "outbox"]
     assert story == [
         ("ai", "created", "pending_payment"),
         ("ai", "status_changed", "payment_submitted"),

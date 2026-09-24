@@ -54,6 +54,13 @@ deposit_min_days_ahead = 2
 details = ""
 
 
+[reminders]
+# Confirmed bookings get an automatic reminder this many hours before the
+# setup starts (see start_time in [pricing]). A booking confirmed after that
+# moment gets no reminder - its confirmation arrives at almost the same time.
+hours_before_start = 3
+
+
 # ---------------------------------------------------------------------------
 # Locations
 #

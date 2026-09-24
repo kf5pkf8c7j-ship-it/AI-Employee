@@ -19,7 +19,7 @@ from cozysetup.bookings import (
     RefusalReason,
 )
 from cozysetup.business_info import BusinessInfo, format_date_en
-from cozysetup.database import BookingStatus, HandoffType
+from cozysetup.database import BookingStatus, HandoffType, Language
 from cozysetup.replies import amount_values, booking_values, location_name, render
 from cozysetup.rules import PaymentChoice, format_kwd
 
@@ -108,7 +108,12 @@ def tool_definitions(info: BusinessInfo) -> list[dict]:
             "Create the booking - call it once, after the customer has said the summary from "
             "show_booking_summary is correct, with exactly the same details. The booking waits for "
             "payment (pending payment); only the owner can confirm it after checking the payment.",
-            booking_details,
+            {
+                **booking_details,
+                "customer_language": {"type": "string", "enum": [language.value for language in Language],
+                                      "description": "The language the customer writes in: en = English, "
+                                                     "ar = Arabic script, arabizi = Arabic in Latin letters."},
+            },
         ),
         _strict_tool(
             "attach_payment_proof",
@@ -231,8 +236,10 @@ class Tools:
 
     def _tool_create_booking(
         self, date: str, location_id: str, customer_name: str, customer_phone: str, payment_choice: str,
+        customer_language: str | None = None,
     ) -> ToolResult:
-        """Creates a PENDING_PAYMENT booking - never a confirmed one."""
+        """Creates a PENDING_PAYMENT booking - never a confirmed one.
+        The customer's language is stored with it, for later messages."""
         request = _booking_request(date, location_id, customer_name, customer_phone, payment_choice)
         preview = self.service.preview_booking(**request)
         if preview != self.conversation.last_preview:
@@ -245,6 +252,7 @@ class Tools:
 
         booking = self.service.create_booking(
             **request, channel=self.conversation.channel, channel_user_id=self.conversation.channel_user_id,
+            language=customer_language,
         )
         self.conversation.last_preview = None  # a second "yes" can't create a second booking
         return ToolResult(_json({

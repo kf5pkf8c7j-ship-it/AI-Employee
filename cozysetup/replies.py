@@ -6,9 +6,13 @@ hand it the finished reply text produced here.
 
 from __future__ import annotations
 
-from cozysetup.bookings import Booking, BookingPreview
+from typing import TYPE_CHECKING
+
 from cozysetup.business_info import BusinessInfo, file_values, format_date_en
 from cozysetup.rules import Amounts, PaymentChoice, calculate_amounts, format_kwd
+
+if TYPE_CHECKING:   # only for type hints - importing bookings here would create an import loop
+    from cozysetup.bookings import Booking, BookingPreview
 
 WAMD_NOT_SET = "[Wamd details not set up yet - the owner will send them]"
 
@@ -53,8 +57,9 @@ def booking_values(info: BusinessInfo, booking: Booking | BookingPreview) -> dic
         "phone": booking.customer_phone,
         **amount_values(info, booking.payment_choice, booking.amounts),
     }
-    if isinstance(booking, Booking):
-        values["reference"] = booking.reference
+    reference = getattr(booking, "reference", None)   # a preview has no reference yet
+    if reference:
+        values["reference"] = reference
     return values
 
 
