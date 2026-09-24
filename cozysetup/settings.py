@@ -1,7 +1,7 @@
-"""Settings for talking to Claude.
+"""Settings for talking to the AI model (OpenAI).
 
 The API key is read from the .env file in the project folder (never saved in
-git) or from the ANTHROPIC_API_KEY environment variable.
+git) or from the OPENAI_API_KEY environment variable.
 """
 
 from __future__ import annotations
@@ -13,15 +13,17 @@ from dotenv import load_dotenv
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_DIR / ".env"
+API_KEY_NAME = "OPENAI_API_KEY"
 
-# The owner chose Claude Sonnet 5 to start with (lower cost); compare with
-# claude-opus-5 in Step 5 if the test conversations need more.
-MODEL = "claude-sonnet-5"
+# The owner chose GPT-6 Sol for the first tests; compare with gpt-6-luna
+# (much cheaper) in Step 5 on the same test conversations.
+MODEL = "gpt-6-sol"
 
-# Price per million tokens, in US dollars - used only to show estimated costs.
+# US dollars per million tokens - used only to show estimated costs.
+# From developers.openai.com/api/docs/pricing (checked September 2026).
 PRICE_PER_MILLION = {
-    "claude-sonnet-5": {"input": 2.00, "output": 10.00},
-    "claude-opus-5": {"input": 5.00, "output": 25.00},
+    "gpt-6-sol": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00},
+    "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50},
 }
 
 
@@ -30,20 +32,25 @@ class MissingApiKey(Exception):
 
 
 def load_api_key(env_file: Path = ENV_FILE) -> str:
-    """The Anthropic API key, from .env or the environment. Never printed or logged."""
+    """The OpenAI API key, from .env or the environment. Never printed or logged."""
     load_dotenv(env_file, override=False)  # a key already in the environment wins
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    key = os.environ.get(API_KEY_NAME, "").strip()
     if not key:
         raise MissingApiKey(
-            f"No Anthropic API key found. Open {env_file} in a text editor and put your key "
-            "after ANTHROPIC_API_KEY= (create a key at console.anthropic.com)."
+            f"No OpenAI API key found. Open {env_file} in a text editor and put your key "
+            f"after {API_KEY_NAME}= (create a key at platform.openai.com)."
         )
     return key
 
 
 def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int,
                        cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> float:
-    """Approximate cost of one request. Cache writes cost 1.25x input, cache reads 0.1x."""
+    """Approximate cost. `input_tokens` are the uncached ones; cached reads and
+    cache writes are counted separately at their own rates."""
     price = PRICE_PER_MILLION[model]
-    input_cost = (input_tokens + cache_write_tokens * 1.25 + cache_read_tokens * 0.1) * price["input"]
-    return (input_cost + output_tokens * price["output"]) / 1_000_000
+    return (
+        input_tokens * price["input"]
+        + cache_read_tokens * price["cached_input"]
+        + cache_write_tokens * price["cache_write"]
+        + output_tokens * price["output"]
+    ) / 1_000_000

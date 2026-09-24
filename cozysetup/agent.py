@@ -1,33 +1,35 @@
 """The agent loop: the AI employee's conversation with one customer.
 
-For each customer message:
-  1. send Claude the instructions, the conversation so far and the tools
-  2. if Claude asks to use tools, run them (through the BookingService) and
-     send the results back - then go to 1
-  3. when Claude answers, that answer goes to the customer
+Uses OpenAI's Responses API. For each customer message:
+  1. send the model the instructions, the conversation so far and the tools
+  2. if the model asks to use tools (function calls), run them through the
+     BookingService and send the results back - then go to 1
+  3. when the model answers, that answer goes to the customer
 
-If anything goes wrong (the API is unreachable, Claude declines, too many
-steps), the case is handed to the owner and the customer gets the owner's
-handoff reply - never an error message and never silence.
+If anything goes wrong (the API is unreachable, the model refuses, the
+answer is cut off, too many steps), the case is handed to the owner and the
+customer gets the owner's handoff reply - never an error message and never
+silence.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
+import openai
 
 from cozysetup.bookings import BookingService
 from cozysetup.database import DEFAULT_DB_PATH, HandoffType
 from cozysetup.prompt import build_system_prompt, today_context
 from cozysetup.replies import render
 from cozysetup.settings import MODEL, estimated_cost_usd
-from cozysetup.tools import Conversation, Tools, tool_definitions
+from cozysetup.tools import Conversation, ToolResult, Tools, tool_definitions
 
-MAX_TOKENS = 16_000
+MAX_OUTPUT_TOKENS = 16_000
 EFFORT = "low"             # customer chat; raise in Step 5 if the tests show it's needed
 MAX_TOOL_ROUNDS = 10       # per customer message - stops a confused loop from running up costs
 DEFAULT_LOG_DIR = DEFAULT_DB_PATH.parent / "conversations"
@@ -35,17 +37,22 @@ DEFAULT_LOG_DIR = DEFAULT_DB_PATH.parent / "conversations"
 
 @dataclass
 class Usage:
-    input_tokens: int = 0
+    input_tokens: int = 0         # uncached input
     output_tokens: int = 0
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
     requests: int = 0
 
     def add(self, usage) -> None:
-        self.input_tokens += usage.input_tokens
+        """Add one response's usage. OpenAI's input_tokens is the total; cached
+        reads and cache writes are parts of it, billed at their own rates."""
+        details = getattr(usage, "input_tokens_details", None)
+        cached = getattr(details, "cached_tokens", 0) or 0
+        written = getattr(details, "cache_write_tokens", 0) or 0
+        self.input_tokens += usage.input_tokens - cached - written
+        self.cache_read_tokens += cached
+        self.cache_write_tokens += written
         self.output_tokens += usage.output_tokens
-        self.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
-        self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
         self.requests += 1
 
     def cost_usd(self, model: str) -> float:
@@ -74,10 +81,36 @@ class ConversationLog:
             file.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
 
+def openai_tool(definition: dict) -> dict:
+    """One of our tool definitions in the Responses API's function-tool format.
+
+    tools.py stays provider-neutral; only the wrapping differs here.
+    """
+    return {
+        "type": "function",
+        "name": definition["name"],
+        "description": definition["description"],
+        "strict": definition["strict"],
+        "parameters": _openai_schema(definition["input_schema"]),
+    }
+
+
+def _openai_schema(schema: dict) -> dict:
+    """Optional fields: our anyOf [X, null] becomes OpenAI's documented "type": [X, "null"]."""
+    schema = copy.deepcopy(schema)
+    for prop in schema.get("properties", {}).values():
+        options = prop.get("anyOf")
+        if options and len(options) == 2 and {"type": "null"} in options:
+            other = next(option for option in options if option != {"type": "null"})
+            del prop["anyOf"]
+            prop["type"] = [other["type"], "null"]
+    return schema
+
+
 class Agent:
     def __init__(
         self,
-        client: anthropic.Anthropic,
+        client: openai.OpenAI,
         service: BookingService,
         conversation: Conversation,
         *,
@@ -91,17 +124,19 @@ class Agent:
         self.tools = Tools(service, conversation)
         self.model = model
         self.log = log
-        self.messages: list[dict] = []   # the whole conversation, sent every time (the API has no memory)
-        # Built once: identical on every request, so it is cached.
+        # The whole conversation, replayed on every request. With store=False
+        # nothing is kept on OpenAI's side, so this list is the only history.
+        self.messages: list = []
+        # Built once and identical on every request, so OpenAI caches them automatically.
         self._system_prompt = build_system_prompt(self.info)
-        self._tool_definitions = tool_definitions(self.info)
+        self._tools = [openai_tool(definition) for definition in tool_definitions(self.info)]
 
     def reply(self, text: str, images: list[bytes] = ()) -> AgentReply:
         """Handle one customer message and return the answer for the customer."""
         content = text.strip()
         for image in images:
             number = self.conversation.add_attachment(image)
-            # Claude is told an image arrived, but never sees it - screenshots are not judged.
+            # The model is told an image arrived, but never sees it - screenshots are not judged.
             content += f"\n[Customer attached image #{number}]"
         self.messages.append({"role": "user", "content": content.strip()})
         self._log("customer", text=content.strip())
@@ -110,47 +145,41 @@ class Agent:
         said: list[str] = []
         for _ in range(MAX_TOOL_ROUNDS + 1):
             try:
-                response = self.client.messages.create(**self._request())
-            except anthropic.APIError as error:
+                response = self.client.responses.create(**self._request())
+            except openai.APIError as error:
                 # The SDK already retried; the service is really unavailable.
-                return self._hand_over(result, f"Claude API error: {type(error).__name__}: {error}")
+                return self._hand_over(result, f"OpenAI API error: {type(error).__name__}: {error}")
             result.usage.add(response.usage)
-            self._log("claude", stop_reason=response.stop_reason,
-                      content=[_block_dict(block) for block in response.content],
-                      usage=_block_dict(response.usage))
+            self._log("ai", status=response.status,
+                      output=[_plain(item) for item in response.output], usage=_plain(response.usage))
 
-            if response.stop_reason == "refusal":
-                return self._hand_over(result, "Claude declined to answer this message.")
-            if response.stop_reason not in ("tool_use", "end_turn", "stop_sequence"):
-                return self._hand_over(result, f"Claude stopped unexpectedly ({response.stop_reason}).")
+            if response.status != "completed":
+                reason = getattr(response.incomplete_details, "reason", None)
+                return self._hand_over(result, f"The response was {response.status} ({reason}).")
+            if _refused(response):
+                return self._hand_over(result, "The model refused to answer this message.")
 
-            # Keep the full answer (including any thinking) in the history, as the API expects.
-            self.messages.append({"role": "assistant", "content": response.content})
-            said += [block.text.strip() for block in response.content if block.type == "text" and block.text.strip()]
+            # Keep every output item (reasoning included) - they must be replayed with tool results.
+            self.messages.extend(response.output)
+            said += [text for text in _texts(response) if text]
+            calls = [item for item in response.output if item.type == "function_call"]
 
-            if response.stop_reason != "tool_use":
+            if not calls:
                 if not said:
-                    return self._hand_over(result, "Claude gave an empty answer.")
+                    return self._hand_over(result, "The model gave an empty answer.")
                 result.text = "\n\n".join(said)
                 self._log("reply", text=result.text, cost_usd=round(result.usage.cost_usd(self.model), 6))
                 return result
 
-            # Run every tool Claude asked for, and send all results back in one message.
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                outcome = self.tools.run(block.name, block.input)
-                result.tools_used.append(block.name)
-                self._log("tool", name=block.name, input=block.input,
-                          result=outcome.content, is_error=outcome.is_error)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": outcome.content,
-                    "is_error": outcome.is_error,
+            # Run every tool the model asked for, and send all results back together.
+            for call in calls:
+                outcome = self._run_tool(call)
+                result.tools_used.append(call.name)
+                self.messages.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": outcome.content,
                 })
-            self.messages.append({"role": "user", "content": tool_results})
 
         return self._hand_over(result, f"More than {MAX_TOOL_ROUNDS} tool rounds for one message.")
 
@@ -159,24 +188,31 @@ class Agent:
     def _request(self) -> dict:
         return {
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "output_config": {"effort": EFFORT},
-            "system": [
-                # The long, unchanging instructions - cached.
-                {"type": "text", "text": self._system_prompt, "cache_control": {"type": "ephemeral"}},
-                # The only part that changes (once a day).
-                {"type": "text", "text": today_context(self.service.today())},
-            ],
-            "tools": self._tool_definitions,
-            "messages": self.messages,
-            # Also cache the conversation so far, so each new message only pays for what's new.
-            "cache_control": {"type": "ephemeral"},
+            # The long, unchanging instructions first; the date (changes once a day) last.
+            "instructions": f"{self._system_prompt}\n\n{today_context(self.service.today())}",
+            "input": self.messages,
+            "tools": self._tools,
+            "reasoning": {"effort": EFFORT},
+            "store": False,   # stateless: customer details stay in our database and logs only
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
         }
+
+    def _run_tool(self, call) -> ToolResult:
+        try:
+            arguments = json.loads(call.arguments)
+        except json.JSONDecodeError:
+            outcome = ToolResult(json.dumps({"error": "The arguments were not valid JSON."}), is_error=True)
+            arguments = call.arguments
+        else:
+            outcome = self.tools.run(call.name, arguments)
+        self._log("tool", name=call.name, input=arguments, result=outcome.content, is_error=outcome.is_error)
+        return outcome
 
     def _hand_over(self, result: AgentReply, problem: str) -> AgentReply:
         """Something went wrong: the owner takes over, and the customer is told so politely."""
         last_customer_text = next(
-            (m["content"] for m in reversed(self.messages) if m["role"] == "user" and isinstance(m["content"], str)),
+            (m["content"] for m in reversed(self.messages)
+             if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)),
             "",
         )
         self.service.create_handoff(
@@ -188,7 +224,7 @@ class Agent:
         )
         result.text = render(self.info, "handoff")["en"]
         result.handed_off_after_problem = True
-        # Keep the history valid for the next message: it must end with an assistant turn.
+        # Keep the history meaningful for the next message.
         self.messages.append({"role": "assistant", "content": result.text})
         self._log("handed_over", problem=problem, reply=result.text)
         return result
@@ -198,10 +234,28 @@ class Agent:
             self.log.write(event, **details)
 
 
-def _block_dict(block) -> object:
+def _texts(response) -> list[str]:
+    return [
+        part.text.strip()
+        for item in response.output if item.type == "message"
+        for part in item.content if part.type == "output_text"
+    ]
+
+
+def _refused(response) -> bool:
+    return any(
+        part.type == "refusal"
+        for item in response.output if item.type == "message"
+        for part in item.content
+    )
+
+
+def _plain(value) -> object:
     """A response part as plain data, for the log."""
-    if hasattr(block, "model_dump"):
-        return block.model_dump(mode="json", exclude_none=True)
-    if hasattr(block, "__dict__"):
-        return {key: _block_dict(value) for key, value in vars(block).items()}
-    return block
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {key: _plain(item) for key, item in vars(value).items()}
+    return value

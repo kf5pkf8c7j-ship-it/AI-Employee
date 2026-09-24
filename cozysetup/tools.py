@@ -1,8 +1,8 @@
 """The 6 tools the AI employee can use, and the code that runs them.
 
-Claude only *asks* to use a tool. The code here decides what happens, always
+The AI only *asks* to use a tool. The code here decides what happens, always
 through the BookingService, so every booking rule applies. Tool results give
-Claude the owner's exact reply text, so it never types facts itself.
+the AI the owner's exact reply text, so it never types facts itself.
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ AI_HANDOFF_TYPES = [t.value for t in HandoffType if t is not HandoffType.DATE_CO
 
 @dataclass
 class Conversation:
-    """Filled in by our code, never by Claude: who the customer is, and what they sent."""
+    """Filled in by our code, never by the AI: who the customer is, and what they sent."""
     channel: str
     channel_user_id: str
-    # Images the customer sent, numbered from 1. Claude never sees the images.
+    # Images the customer sent, numbered from 1. The AI never sees the images.
     attachments: dict[int, bytes] = field(default_factory=dict)
     # The booking details last shown to the customer as a summary.
     last_preview: BookingPreview | None = None
@@ -47,11 +47,11 @@ class Conversation:
 
 @dataclass(frozen=True)
 class ToolResult:
-    content: str       # JSON text given to Claude
+    content: str       # JSON text given to the AI
     is_error: bool = False
 
 
-# --- The tool descriptions Claude reads ------------------------------------------
+# --- The tool descriptions the AI reads ------------------------------------------
 
 def _strict_tool(name: str, description: str, properties: dict) -> dict:
     return {
@@ -146,7 +146,7 @@ def tool_definitions(info: BusinessInfo) -> list[dict]:
 
 # --- Running the tools ------------------------------------------------------------------
 
-# What Claude should do when the booking service refuses something.
+# What the AI should do when the booking service refuses something.
 REFUSAL_INSTRUCTIONS = {
     RefusalReason.PAST_DATE: "That date has passed. Ask the customer for another date.",
     RefusalReason.SAME_DAY: "Same-day bookings are handled by the owner: call handoff_to_human with type same_day.",
