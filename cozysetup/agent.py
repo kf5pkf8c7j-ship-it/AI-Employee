@@ -115,6 +115,7 @@ class Agent:
         conversation: Conversation,
         *,
         model: str = MODEL,
+        effort: str = EFFORT,
         log: ConversationLog | None = None,
     ):
         self.client = client
@@ -123,6 +124,7 @@ class Agent:
         self.conversation = conversation
         self.tools = Tools(service, conversation)
         self.model = model
+        self.effort = effort
         self.log = log
         # The whole conversation, replayed on every request. With store=False
         # nothing is kept on OpenAI's side, so this list is the only history.
@@ -192,7 +194,7 @@ class Agent:
             "instructions": f"{self._system_prompt}\n\n{today_context(self.service.today())}",
             "input": self.messages,
             "tools": self._tools,
-            "reasoning": {"effort": EFFORT},
+            "reasoning": {"effort": self.effort},
             "store": False,   # stateless: customer details stay in our database and logs only
             "max_output_tokens": MAX_OUTPUT_TOKENS,
         }
