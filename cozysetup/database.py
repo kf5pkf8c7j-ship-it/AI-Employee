@@ -16,7 +16,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cozysetup.d
 
 # The current table version. An older file is upgraded step by step with the
 # MIGRATIONS below; a newer one (made by newer code) is refused.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # --- The values the database accepts ------------------------------------------
@@ -174,6 +174,54 @@ CREATE UNIQUE INDEX one_waiting_message_per_kind
 
 -- Finding the messages that are due, quickly.
 CREATE INDEX outbox_due ON outbox (status, send_after);
+""",
+    3: """
+-- One conversation per customer on a real channel (Instagram). Instagram DMs
+-- arrive one by one to a server that can restart, so everything the AI needs
+-- to continue the conversation is kept here.
+CREATE TABLE conversations (
+    id                        INTEGER PRIMARY KEY,
+    channel                   TEXT    NOT NULL,          -- e.g. instagram
+    channel_user_id           TEXT    NOT NULL,          -- the customer's id on that channel (Instagram: IGSID)
+    language                  TEXT    CHECK (language IN ('en', 'ar', 'arabizi')),
+    history                   TEXT    NOT NULL DEFAULT '[]',   -- JSON: the AI conversation, replayed every time
+    last_preview              TEXT,                      -- JSON: booking details last shown as a summary
+    disclosure_sent           INTEGER NOT NULL DEFAULT 0 CHECK (disclosure_sent IN (0, 1)),
+    ai_paused                 INTEGER NOT NULL DEFAULT 0 CHECK (ai_paused IN (0, 1)),
+    paused_at                 TEXT,
+    pause_reason              TEXT,
+    last_customer_message_at  TEXT,                      -- for the 24-hour messaging window
+    created_at                TEXT    NOT NULL,
+    updated_at                TEXT    NOT NULL,
+    UNIQUE (channel, channel_user_id)
+) STRICT;
+
+-- Images a customer sent in a conversation (the files are kept next to the database).
+CREATE TABLE conversation_attachments (
+    id               INTEGER PRIMARY KEY,
+    conversation_id  INTEGER NOT NULL REFERENCES conversations (id),
+    number           INTEGER NOT NULL CHECK (number >= 1),   -- "[Customer attached image #N]"
+    file_name        TEXT    NOT NULL,
+    created_at       TEXT    NOT NULL,
+    UNIQUE (conversation_id, number)
+) STRICT;
+
+-- Every message received from a channel, recorded once (the channel's message id
+-- is unique), then processed in order. Filled from Step 7.3 (webhooks).
+CREATE TABLE inbound_messages (
+    id               INTEGER PRIMARY KEY,
+    channel          TEXT    NOT NULL,
+    external_id      TEXT    NOT NULL,                   -- Instagram: the message id (mid)
+    channel_user_id  TEXT    NOT NULL,
+    received_at      TEXT    NOT NULL,
+    payload          TEXT    NOT NULL,                   -- the event exactly as received (JSON)
+    status           TEXT    NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'done', 'failed', 'ignored')),
+    processed_at     TEXT,
+    error            TEXT,
+    UNIQUE (channel, external_id)
+) STRICT;
+
+CREATE INDEX inbound_waiting ON inbound_messages (status, received_at);
 """,
 }
 

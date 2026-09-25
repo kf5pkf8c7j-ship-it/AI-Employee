@@ -31,16 +31,30 @@ class MissingApiKey(Exception):
     pass
 
 
+INSTAGRAM_TOKEN_NAME = "IG_ACCESS_TOKEN"
+
+
 def load_api_key(env_file: Path = ENV_FILE) -> str:
     """The OpenAI API key, from .env or the environment. Never printed or logged."""
-    load_dotenv(env_file, override=False)  # a key already in the environment wins
-    key = os.environ.get(API_KEY_NAME, "").strip()
-    if not key:
-        raise MissingApiKey(
-            f"No OpenAI API key found. Open {env_file} in a text editor and put your key "
-            f"after {API_KEY_NAME}= (create a key at platform.openai.com)."
-        )
-    return key
+    return _load_secret(env_file, API_KEY_NAME,
+                        f"No OpenAI API key found. Open {env_file} in a text editor and put your key "
+                        f"after {API_KEY_NAME}= (create a key at platform.openai.com).")
+
+
+def load_instagram_token(env_file: Path = ENV_FILE) -> str:
+    """The Instagram access token, from .env or the environment. Never printed or logged."""
+    return _load_secret(env_file, INSTAGRAM_TOKEN_NAME,
+                        f"No Instagram access token found. Open {env_file} in a text editor and paste it "
+                        f"after {INSTAGRAM_TOKEN_NAME}= (Meta App Dashboard > Instagram > API setup with "
+                        "Instagram business login > Generate token).")
+
+
+def _load_secret(env_file: Path, name: str, missing_message: str) -> str:
+    load_dotenv(env_file, override=False)  # a value already in the environment wins
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise MissingApiKey(missing_message)
+    return value
 
 
 def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int,

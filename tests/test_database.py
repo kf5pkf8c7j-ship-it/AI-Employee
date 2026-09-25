@@ -55,7 +55,8 @@ def test_creates_the_file_and_tables(tmp_path):
     tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     connection.close()
     assert path.exists()
-    assert tables == {"bookings", "booking_events", "handoffs", "outbox"}
+    assert tables == {"bookings", "booking_events", "handoffs", "outbox",
+                      "conversations", "conversation_attachments", "inbound_messages"}
 
 
 def test_opening_again_keeps_the_data(tmp_path):
@@ -178,8 +179,8 @@ def columns(connection, table):
     return [row["name"] for row in connection.execute(f"PRAGMA table_info({table})")]
 
 
-def test_a_new_database_starts_at_version_2(db):
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+def test_a_new_database_starts_at_the_latest_version(db):
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
     assert "language" in columns(db, "bookings")
 
 
@@ -188,7 +189,7 @@ def test_a_version_1_file_is_upgraded_and_keeps_all_its_data(tmp_path):
     make_version_1_file(path)
 
     connection = connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     booking = connection.execute("SELECT * FROM bookings").fetchone()
     assert (booking["reference"], booking["status"], booking["rental_price"]) == ("CS-0001", "confirmed", 50_000)
     assert booking["language"] is None          # unknown for bookings made before version 2
@@ -203,7 +204,7 @@ def test_a_copy_is_saved_before_upgrading(tmp_path):
     make_version_1_file(path)
     connect(path).close()
 
-    backup = tmp_path / "cozysetup.db.before-v2.bak"
+    backup = tmp_path / f"cozysetup.db.before-v{SCHEMA_VERSION}.bak"
     assert backup.exists()
     old = sqlite3.connect(backup)
     assert old.execute("PRAGMA user_version").fetchone()[0] == 1          # the untouched original
@@ -215,11 +216,11 @@ def test_opening_an_upgraded_database_again_changes_nothing(tmp_path):
     path = tmp_path / "cozysetup.db"
     make_version_1_file(path)
     connect(path).close()
-    backup = tmp_path / "cozysetup.db.before-v2.bak"
+    backup = tmp_path / f"cozysetup.db.before-v{SCHEMA_VERSION}.bak"
     first_backup = backup.read_bytes()
 
     connection = connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert connection.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 1
     connection.close()
     assert backup.read_bytes() == first_backup     # not overwritten
