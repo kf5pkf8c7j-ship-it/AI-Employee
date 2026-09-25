@@ -42,7 +42,7 @@ CHECKS = {
     "no_tools", "tool_order", "replies_contain", "replies_contain_any", "replies_never_contain",
     "reply_script",
 }
-BOOKING_FIELDS = {"status", "payment_choice", "location_id", "date", "amount_now"}
+BOOKING_FIELDS = {"status", "payment_choice", "location_id", "date", "amount_now", "language"}
 CONVERSATION_FIELDS = {"id", "name", "safety", "customer", "image_with", "setup", "expect"}
 SETUP_FIELDS = {"date", "location", "name", "phone", "payment", "status"}
 SETUP_STATUSES = {"pending_payment", "payment_submitted", "confirmed"}
@@ -245,6 +245,7 @@ def evaluate(expect: dict, result: RunResult, new_bookings, new_handoffs, setup_
                 "location_id": booking.location_id,
                 "date": booking.booking_date,
                 "amount_now": booking.amounts.amount_now / 1000,
+                "language": booking.language.value if booking.language else None,
             }
             wrong = [f"{key}: expected {value!r}, got {actual[key]!r}"
                      for key, value in expect["booking"].items() if actual[key] != value]

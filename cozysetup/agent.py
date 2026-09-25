@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -23,13 +24,26 @@ from pathlib import Path
 import openai
 
 from cozysetup.bookings import BookingService
-from cozysetup.database import DEFAULT_DB_PATH, HandoffType
+from cozysetup.database import DEFAULT_DB_PATH, HandoffType, Language
+from cozysetup.language import detect_language, has_arabic_script
 from cozysetup.prompt import build_system_prompt, today_context
 from cozysetup.replies import render
 from cozysetup.settings import MODEL, estimated_cost_usd
 from cozysetup.tools import Conversation, ToolResult, Tools, tool_definitions
 
 MAX_OUTPUT_TOKENS = 16_000
+
+# The Arabizi guard: instructions for the one-off rewrite request.
+ARABIZI_REWRITE_INSTRUCTIONS = """\
+Rewrite the message below as Arabizi: Kuwaiti Arabic written only in Latin letters and numbers \
+(e.g. 3 for ع, 7 for ح). No Arabic script at all - not a single Arabic letter.
+Keep everything else exactly the same: every price, amount, "dinar", date, time, booking \
+reference (like CS-0001), phone number, name, the Wamd and payment wording, anything in square \
+brackets, and the line breaks. Do not add, remove or change any information.
+Reply with the rewritten message only."""
+# Numbers that are facts (prices, dates, times, CS-0001, phone numbers) - not the digits
+# used as letters inside Arabizi words like "7awwel" or "3abr", whose spelling may vary.
+_NUMBER = re.compile(r"(?<![A-Za-z])\d+(?![A-Za-z])")
 EFFORT = "low"             # customer chat; raise in Step 5 if the tests show it's needed
 MAX_TOOL_ROUNDS = 10       # per customer message - stops a confused loop from running up costs
 DEFAULT_LOG_DIR = DEFAULT_DB_PATH.parent / "conversations"
@@ -125,6 +139,8 @@ class Agent:
         self.tools = Tools(service, conversation)
         self.model = model
         self.effort = effort
+        # The customer's language as far as we can tell (see language.py); drives the Arabizi guard.
+        self.customer_language: Language | None = None
         self.log = log
         # The whole conversation, replayed on every request. With store=False
         # nothing is kept on OpenAI's side, so this list is the only history.
@@ -141,6 +157,7 @@ class Agent:
             # The model is told an image arrived, but never sees it - screenshots are not judged.
             content += f"\n[Customer attached image #{number}]"
         self.messages.append({"role": "user", "content": content.strip()})
+        self.customer_language = detect_language(text) or self.customer_language
         self._log("customer", text=content.strip())
 
         result = AgentReply(text="")
@@ -170,6 +187,8 @@ class Agent:
                 if not said:
                     return self._hand_over(result, "The model gave an empty answer.")
                 result.text = "\n\n".join(said)
+                if self.customer_language is Language.ARABIZI and has_arabic_script(result.text):
+                    result.text = self._arabizi_guard(result.text, result)
                 self._log("reply", text=result.text, cost_usd=round(result.usage.cost_usd(self.model), 6))
                 return result
 
@@ -199,6 +218,40 @@ class Agent:
             "max_output_tokens": MAX_OUTPUT_TOKENS,
         }
 
+    def _arabizi_guard(self, text: str, result: AgentReply) -> str:
+        """An Arabizi customer must never get Arabic letters. Ask the model once to
+        rewrite the reply in Latin letters; use the rewrite only if it has no Arabic
+        letters left and still contains every number of the original (prices, dates,
+        times, references, phones). Otherwise send the original."""
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=ARABIZI_REWRITE_INSTRUCTIONS,
+                input=[{"role": "user", "content": text}],
+                reasoning={"effort": self.effort},
+                store=False,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            )
+        except openai.APIError as error:
+            self._log("arabizi_guard", outcome="kept original", reason=f"{type(error).__name__}: {error}",
+                      original=text)
+            return text
+        result.usage.add(response.usage)
+        rewritten = "\n\n".join(_texts(response)).strip()
+
+        missing = sorted(set(_NUMBER.findall(text)) - set(_NUMBER.findall(rewritten)))
+        if response.status != "completed" or _refused(response) or not rewritten:
+            reason = "the rewrite request did not complete"
+        elif has_arabic_script(rewritten):
+            reason = "the rewrite still contains Arabic letters"
+        elif missing:
+            reason = f"the rewrite lost numbers: {missing}"
+        else:
+            self._log("arabizi_guard", outcome="rewritten", original=text, rewritten=rewritten)
+            return rewritten
+        self._log("arabizi_guard", outcome="kept original", reason=reason, original=text, rewritten=rewritten)
+        return text
+
     def _run_tool(self, call) -> ToolResult:
         try:
             arguments = json.loads(call.arguments)
@@ -207,6 +260,11 @@ class Agent:
             arguments = call.arguments
         else:
             outcome = self.tools.run(call.name, arguments)
+            if call.name == "create_booking" and not outcome.is_error:
+                try:
+                    self.customer_language = Language(arguments.get("customer_language"))
+                except ValueError:
+                    pass
         self._log("tool", name=call.name, input=arguments, result=outcome.content, is_error=outcome.is_error)
         return outcome
 

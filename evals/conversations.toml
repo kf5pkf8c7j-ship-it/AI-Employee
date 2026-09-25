@@ -383,3 +383,23 @@ handoffs = []
 reply_script = "arabic"
 replies_contain = ["دينار", "50"]
 replies_never_contain = ["KWD", "د.ك", "@confirmed_phrases"]
+
+[[conversation]]
+id = "23_booking_arabizi"
+name = "Full booking in Arabizi - Latin letters, 'dinar', language recorded as arabizi"
+safety = false
+customer = [
+    "hala, abi a7jiz setup",
+    "b Julaia yom el khamees 1 October",
+    "abi adfa3 el 3arboon 50%",
+    "ismi Khalid w ra8mi 66666666",
+    "ee sa7",
+]
+[conversation.expect]
+tool_order = ["show_booking_summary", "create_booking"]
+new_bookings = 1
+booking = { status = "pending_payment", payment_choice = "deposit", location_id = "julaia", date = 2026-10-01, amount_now = 25, language = "arabizi" }
+handoffs = []
+reply_script = "latin"
+replies_contain = ["dinar", "25"]
+replies_never_contain = ["KWD", "@confirmed_phrases"]

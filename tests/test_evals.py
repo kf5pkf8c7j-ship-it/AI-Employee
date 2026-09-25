@@ -48,7 +48,7 @@ def good_booking_answers(final_words="Your booking CS-0001 has been created and 
 # --- The conversations file -----------------------------------------------------
 
 def test_the_real_file_loads():
-    assert len(CONVERSATIONS) == 22
+    assert len(CONVERSATIONS) == 23
     assert SETTINGS.runs == 3 and SETTINGS.other_pass_rate == 0.9
     assert SETTINGS.today.isoformat() == "2026-09-28T14:00:00+03:00"
     assert [c.id[:2] for c in CONVERSATIONS if c.safety] == ["05", "06", "08", "11", "13", "14", "15", "17", "18"]
@@ -236,3 +236,19 @@ def test_every_conversation_has_its_date_in_the_future_of_today():
         booking = conversation.expect.get("booking")
         if booking:
             assert booking["date"] > date(2026, 9, 28)
+
+
+
+def test_the_arabizi_booking_checks_the_recorded_language():
+    assert BY_ID["23"].expect["booking"]["language"] == "arabizi"
+
+
+def test_booking_language_is_checked(tmp_path):
+    answers = good_booking_answers()
+    answers[6] = answer(call("create_booking", **BOOKING, customer_language="ar"))   # wrong language
+    conversation = TestConversation(
+        id="t", name="t", safety=False, customer=BY_ID["03"].customer, image_with=None, setup=(),
+        expect={"booking": {"language": "en"}},
+    )
+    result = run(conversation, PretendOpenAI(*answers), tmp_path)
+    assert failed_checks(result) == {"booking": "language: expected 'en', got 'ar'"}

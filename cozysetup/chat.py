@@ -8,8 +8,13 @@ Check what the AI did with the owner commands, e.g.:
     uv run cozysetup-admin --db data/practice/practice.db pending
 
 In the chat:  /image PATH   send an image (e.g. a transfer screenshot)
+              /inbox        show messages CozySetup has sent you
               /new          start a new conversation (another customer)
               /quit         leave
+
+Confirmations and reminders are delivered by the outbox sender, running in
+another window:  uv run cozysetup-outbox --db data/practice/practice.db watch
+Once delivered, they appear in the chat like messages on the customer's phone.
 """
 
 from __future__ import annotations
@@ -25,7 +30,8 @@ import openai
 from cozysetup.agent import Agent, AgentReply, ConversationLog, Usage
 from cozysetup.bookings import BookingService
 from cozysetup.business_info import BusinessInfoError, load_business_info
-from cozysetup.database import DEFAULT_DB_PATH, connect
+from cozysetup.database import DEFAULT_DB_PATH, OutboxStatus, connect
+from cozysetup.outbox import OutboxMessage
 from cozysetup.settings import MODEL, MissingApiKey, load_api_key
 from cozysetup.tools import Conversation
 
@@ -35,8 +41,38 @@ GREY, RESET = "\033[90m", "\033[0m"
 HELP = """\
 You are the customer. Write as a customer would (English, Kuwaiti Arabic or Arabizi).
   /image PATH   send an image, e.g. a transfer screenshot
+  /inbox        show messages CozySetup has sent you (confirmations, reminders)
   /new          start a new conversation (another customer)
   /quit         leave"""
+
+
+class Inbox:
+    """What the outbox has delivered to this practice conversation - shown the way
+    the messages would arrive on the customer's phone. It only reads: sending is
+    done by cozysetup-outbox."""
+
+    def __init__(self, db, conversation: Conversation):
+        self.db = db
+        self.channel = conversation.channel
+        self.recipient = conversation.channel_user_id
+        self._shown: set[int] = set()
+
+    def new_messages(self) -> list[OutboxMessage]:
+        rows = self.db.execute(
+            "SELECT * FROM outbox WHERE channel = ? AND recipient = ? AND status = ? ORDER BY sent_at, id",
+            (self.channel, self.recipient, OutboxStatus.SENT.value),
+        ).fetchall()
+        messages = [OutboxMessage.from_row(row) for row in rows if row["id"] not in self._shown]
+        self._shown.update(message.id for message in messages)
+        return messages
+
+
+def show_delivered(inbox: Inbox) -> int:
+    messages = inbox.new_messages()
+    for message in messages:
+        print("\n📩 Message from CozySetup:")
+        print("\n".join(f"   {line}" for line in message.text.splitlines()))
+    return len(messages)
 
 
 def main(
@@ -70,8 +106,11 @@ def main(
     practice = "practice database" if args.db == PRACTICE_DB_PATH else f"database {args.db}"
     print(f"CozySetup AI employee - {MODEL} - {practice}")
     print(HELP)
+    print(f"{GREY}Confirmations and reminders arrive when this runs in another window: "
+          f"uv run cozysetup-outbox --db {args.db} watch{RESET}")
 
     agent, total = _new_conversation(client, service, log_dir), Usage()
+    inbox = Inbox(db, agent.conversation)
     try:
         while True:
             try:
@@ -83,8 +122,13 @@ def main(
                 continue
             if line == "/quit":
                 break
+            if line == "/inbox":
+                if not show_delivered(inbox):
+                    print(f"{GREY}(no new messages){RESET}")
+                continue
             if line == "/new":
                 agent = _new_conversation(client, service, log_dir)
+                inbox = Inbox(db, agent.conversation)
                 print(f"{GREY}(new conversation - log: {agent.log.path.name}){RESET}")
                 continue
 
@@ -100,6 +144,7 @@ def main(
             _add(total, reply.usage)
             print(f"\nCozySetup: {reply.text}")
             print(f"{GREY}{_details(reply)}{RESET}")
+            show_delivered(inbox)   # anything delivered to "your phone" since last time
     finally:
         db.close()
         if total.requests:

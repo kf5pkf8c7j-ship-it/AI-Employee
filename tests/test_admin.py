@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from cozysetup import admin
+from cozysetup import outbox as outbox_module
 from cozysetup.bookings import BookingService
 from cozysetup.business_info import load_business_info
-from cozysetup.database import connect
+from cozysetup.database import OutboxStatus, connect
 
 INFO = load_business_info()
 # Pretend it is Monday 28 September 2026, 2 PM in Kuwait.
@@ -447,8 +448,6 @@ def test_overview_reminds_to_complete_past_setups(service, db_path, capsys):
 
 # --- Step 6.4: messages to customers ------------------------------------------------------
 
-from cozysetup import outbox as outbox_module          # noqa: E402
-from cozysetup.database import OutboxStatus            # noqa: E402
 
 MONA = ["add", "--date", "2026-10-01", "--location", "bnaider", "--name", "Mona",
         "--phone", "66666666", "--payment", "full"]
