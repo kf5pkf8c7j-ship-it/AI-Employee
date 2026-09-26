@@ -7,6 +7,8 @@ dependencies = [
     "openai>=3.19.2",
     "phonenumbers>=9.0.39",
     "python-dotenv>=1.2.3",
+    "starlette>=1.7.0",
+    "uvicorn>=0.54.0",
 ]
 
 # Commands installed by `uv sync`, e.g. `uv run cozysetup-admin pending`.
@@ -15,6 +17,7 @@ cozysetup-admin = "cozysetup.admin:main"
 cozysetup-chat = "cozysetup.chat:main"
 cozysetup-eval = "cozysetup.evals:main"
 cozysetup-outbox = "cozysetup.send_outbox:main"
+cozysetup-instagram = "cozysetup.serve_instagram:main"
 
 # How to install this project as a package. uv_build is uv's own builder;
 # module-root = "" because the cozysetup/ folder sits directly in the project.
@@ -27,6 +30,7 @@ module-root = ""
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
 

@@ -7,6 +7,7 @@ git) or from the OPENAI_API_KEY environment variable.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -47,6 +48,25 @@ def load_instagram_token(env_file: Path = ENV_FILE) -> str:
                         f"No Instagram access token found. Open {env_file} in a text editor and paste it "
                         f"after {INSTAGRAM_TOKEN_NAME}= (Meta App Dashboard > Instagram > API setup with "
                         "Instagram business login > Generate token).")
+
+
+@dataclass(frozen=True)
+class WebhookSettings:
+    app_secret: str       # signs every webhook Meta sends (X-Hub-Signature-256)
+    verify_token: str     # our answer to Meta's one-time verification
+    account_id: str       # our Instagram account: events for any other account are skipped
+
+
+def load_webhook_settings(env_file: Path = ENV_FILE) -> WebhookSettings:
+    """Never printed or logged."""
+    return WebhookSettings(
+        app_secret=_load_secret(env_file, "META_APP_SECRET",
+                                f"No META_APP_SECRET in {env_file}. Copy the Instagram app secret from the Meta App "
+                                "Dashboard (Instagram > API setup with Instagram business login) after META_APP_SECRET=."),
+        verify_token=_load_secret(env_file, "WEBHOOK_VERIFY_TOKEN", f"No WEBHOOK_VERIFY_TOKEN in {env_file}."),
+        account_id=_load_secret(env_file, "IG_ACCOUNT_ID",
+                                f"No IG_ACCOUNT_ID in {env_file}. Run: uv run python -m cozysetup.check_instagram"),
+    )
 
 
 def _load_secret(env_file: Path, name: str, missing_message: str) -> str:
