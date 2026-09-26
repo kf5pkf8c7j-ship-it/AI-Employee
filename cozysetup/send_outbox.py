@@ -5,9 +5,11 @@
     uv run cozysetup-outbox watch --every 30
     uv run cozysetup-outbox run --db data/practice/practice.db
 
-Uses the real database by default. No real external channel is connected yet:
-terminal and eval messages are written to outbox_delivered.log next to the
-database. "Send yourself" messages are left for the owner.
+Uses the real database by default. Instagram messages are sent as real
+Instagram DMs (with the token in .env) - but only within Instagram's 24-hour
+window; otherwise they become "send yourself" for the owner. Terminal and
+eval messages are written to outbox_delivered.log next to the database.
+"Send yourself" messages are left for the owner.
 """
 
 from __future__ import annotations
@@ -22,11 +24,12 @@ from pathlib import Path
 from cozysetup import outbox
 from cozysetup.bookings import BookingService
 from cozysetup.business_info import BusinessInfoError, load_business_info
-from cozysetup.database import DEFAULT_DB_PATH, connect
-from cozysetup.senders import LOG_FILE_NAME, default_senders
+from cozysetup.database import DEFAULT_DB_PATH, OutboxStatus, connect
+from cozysetup.senders import INSTAGRAM_CHANNEL, LOG_FILE_NAME, default_senders
+from cozysetup.settings import MissingApiKey, load_instagram_token
 
 MARKS = {"sent": "✓ sent", "retry": "↻ retry later", "failed": "✗ failed", "cancelled": "– not sent",
-         "error": "⚠ error"}
+         "send_yourself": "✋ send yourself", "error": "⚠ error"}
 
 
 def show(results: list[outbox.Delivery]) -> None:
@@ -38,6 +41,9 @@ def summary(results: list[outbox.Delivery]) -> str:
     count = {outcome: sum(r.outcome == outcome for r in results) for outcome in MARKS}
     text = (f"sent {count['sent']} · retry later {count['retry']} · failed {count['failed']} · "
             f"not sent {count['cancelled']}")
+    if count["send_yourself"]:
+        text += (f" · send yourself {count['send_yourself']} (Instagram's 24-hour window is closed - "
+                 "see: cozysetup-admin outbox)")
     if count["error"]:
         text += f" · errors {count['error']} (those messages stay pending and are tried again next run)"
     if count["failed"]:
@@ -74,7 +80,8 @@ def main(
     db = connect(args.db)
     try:
         service = BookingService(db, info, clock=clock, proofs_dir=args.db.parent / "payment_proofs")
-        senders = senders if senders is not None else default_senders(args.db.parent / LOG_FILE_NAME, service.now)
+        if senders is None:
+            senders = default_senders(args.db.parent / LOG_FILE_NAME, service.now, _instagram_token(db))
 
         if args.command == "run":
             results = outbox.deliver_due(service, senders)
@@ -106,6 +113,20 @@ def main(
         return 0
     finally:
         db.close()
+
+
+def _instagram_token(db) -> str | None:
+    """The Instagram access token from .env - or None, with a note when Instagram
+    messages are waiting (they then fail and the owner gets a handoff)."""
+    try:
+        return load_instagram_token()
+    except MissingApiKey:
+        waiting = db.execute("SELECT COUNT(*) FROM outbox WHERE channel = ? AND status = ?",
+                             (INSTAGRAM_CHANNEL, OutboxStatus.PENDING.value)).fetchone()[0]
+        if waiting:
+            print(f"⚠ No IG_ACCESS_TOKEN in .env: {waiting} waiting Instagram message(s) can't be sent automatically.",
+                  file=sys.stderr)
+        return None
 
 
 if __name__ == "__main__":

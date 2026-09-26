@@ -565,7 +565,7 @@ def test_the_new_replies_are_owner_texts_in_business_toml():
 
 # --- Database version 4 ---------------------------------------------------------------------------------
 
-def test_a_version_3_database_is_upgraded_to_4_keeping_its_messages(tmp_path):
+def test_a_version_3_database_is_upgraded_keeping_its_messages(tmp_path):
     path = tmp_path / "cozysetup.db"
     db = sqlite3.connect(path)
     db.executescript(f"BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;")
@@ -577,13 +577,13 @@ def test_a_version_3_database_is_upgraded_to_4_keeping_its_messages(tmp_path):
     db.close()
 
     db = connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     row = db.execute("SELECT * FROM inbound_messages").fetchone()
     assert (row["external_id"], row["status"], row["attempts"], row["last_attempt_at"]) == \
         ("mid.1", "waiting", 0, None)
     assert db.execute("SELECT COUNT(*) FROM conversation_replies").fetchone()[0] == 0
     db.close()
-    backup = sqlite3.connect(tmp_path / "cozysetup.db.before-v4.bak")
+    backup = sqlite3.connect(tmp_path / f"cozysetup.db.before-v{SCHEMA_VERSION}.bak")
     assert backup.execute("PRAGMA user_version").fetchone()[0] == 3
     backup.close()
 

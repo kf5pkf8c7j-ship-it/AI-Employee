@@ -32,6 +32,7 @@ from cozysetup.business_info import (
 )
 from cozysetup.database import DEFAULT_DB_PATH, BookingStatus, HandoffStatus, HandoffType, OutboxKind, OutboxStatus, connect
 from cozysetup.rules import PaymentChoice, format_kwd
+from cozysetup.senders import INSTAGRAM_CHANNEL
 
 STATUS_LABELS = {
     BookingStatus.PENDING_PAYMENT: "waiting for payment",
@@ -547,11 +548,13 @@ def command_outbox(ctx: Context, args: argparse.Namespace) -> int:
         print(f"\n{title} ({len(group)})")
         for message in group:
             booking = service.get_booking_by_id(message.booking_id)
-            target = message.recipient if message.status is OutboxStatus.SEND_YOURSELF \
+            target = send_yourself_target(message, booking) if message.status is OutboxStatus.SEND_YOURSELF \
                 else f"{message.recipient} ({message.channel})"
             print(f"  #{message.id:<3} {message.kind.value:<13} {booking.reference} {booking.customer_name}"
                   f"  → {target}   {describe_message_state(message, now)}")
             if title == "SEND YOURSELF - DUE NOW":
+                if message.last_error:
+                    print(f"        Why: {message.last_error}")
                 print("\n".join(f"        {line}" for line in message.text.splitlines()))
                 print(f"        → when sent: cozysetup-admin mark-sent {message.id}")
             if title == "FAILED":
@@ -597,7 +600,7 @@ def command_mark_sent(ctx: Context, args: argparse.Namespace) -> int:
         return fail(f"Message #{message.id} can't be marked as sent: {booking.reference} is {booking.status.value}")
 
     lines = [f"Mark message #{message.id} as sent? ({message.kind.value} for {booking.reference}, "
-             f"{booking.customer_name}, to {message.recipient})"]
+             f"{booking.customer_name}, to {send_yourself_target(message, booking)})"]
     lines += [f"    {line}" for line in message.text.splitlines()]
     if message.status is OutboxStatus.FAILED:
         lines.append("  Automatic sending failed - you contacted the customer yourself. "
@@ -635,6 +638,14 @@ def report_confirmation_messages(ctx: Context, booking: Booking) -> None:
         print(f"Reminder queued for {when(reminder.send_after)}.")
     else:
         print(f"No reminder: confirmed after its time ({reminder_hour}).")
+
+
+def send_yourself_target(message, booking: Booking) -> str:
+    """Where the owner sends a message personally. An Instagram id means nothing to
+    the owner, so an Instagram message shows who to write to in the app."""
+    if message.channel == INSTAGRAM_CHANNEL:
+        return f"Instagram DM to {booking.customer_name} ({booking.customer_phone})"
+    return message.recipient
 
 
 def waiting_messages(service: BookingService, booking: Booking) -> list:

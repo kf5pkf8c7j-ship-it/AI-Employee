@@ -75,8 +75,10 @@ happens. Stop it with Ctrl+C. To send once and stop: `uv run cozysetup-outbox ru
   `mark-sent`.
 - Reminders go out 3 hours before the setup (3 PM). A reminder is never sent
   after 6 PM, and a confirmation never after the booking date.
-- No real channel (WhatsApp, SMS, …) is connected yet: messages to chat
-  customers are written to `data/outbox_delivered.log`.
+- Instagram customers get real Instagram DMs — within Instagram's 24-hour
+  window only; otherwise the message becomes "send yourself" (see Instagram DMs
+  below). Messages to terminal-chat customers are written to
+  `data/outbox_delivered.log`.
 
 ---
 
@@ -103,8 +105,12 @@ uv run cozysetup-instagram resume CUSTOMER_ID # the id shown in the list
 If a reply can't be sent (after 3 tries, or because Instagram's 24-hour reply window has closed),
 you get a handoff with the exact text, so you can send it yourself.
 
-Not connected yet: confirmations and reminders for Instagram bookings are not sent on Instagram.
-The outbox gives you a handoff for them instead — send them yourself.
+**Confirmations and reminders for Instagram bookings** are sent on Instagram by the outbox sender
+(`cozysetup-outbox watch`) — but only if the customer wrote in the last 24 hours, because Instagram
+doesn't allow more. Otherwise they appear in `cozysetup-admin outbox` as **send yourself**, showing
+who to write to ("Instagram DM to …") and the exact text; send it in the Instagram app, then
+`cozysetup-admin mark-sent #`. The reminder is checked on the booking day, so it usually needs you.
+They are sent even while the AI is paused in that chat.
 
 ---
 
@@ -147,7 +153,7 @@ uv run pytest
 | Your business facts, prices, wording | `config/business.toml` — check it with `uv run python -m cozysetup.show_business_info` |
 | The API key | `.env` — never commit it, never paste it into a chat |
 | Real bookings | `data/cozysetup.db` |
-| Database backups made before upgrades | `data/*.before-v2.bak`, `.before-v3.bak`, `.before-v4.bak` |
+| Database backups made before upgrades | `data/*.before-v2.bak` … `.before-v5.bak` |
 | Payment screenshots | `data/payment_proofs/` |
 | Messages "delivered" to chat customers | `data/outbox_delivered.log` |
 | The AI's Instagram conversation logs | `data/conversations/instagram_*.jsonl` |

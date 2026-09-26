@@ -6,18 +6,18 @@ SMS, ...) means adding one sender here - nothing else changes.
 
 The LogSender "delivers" by writing the message to a file, so the owner can
 see exactly what a customer would have received, and when. The
-InstagramSender sends real Instagram DMs; for now only the Instagram worker
-uses it (chat replies) - confirmations and reminders to Instagram customers
-are not connected to it yet.
+InstagramSender sends real Instagram DMs: the Instagram worker's chat
+replies, and the outbox's confirmations and reminders to Instagram customers.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -61,12 +61,32 @@ class LogSender:
             file.write(f"{self.clock():%Y-%m-%d %H:%M}  {self.channel} → {recipient}\n{body}\n\n")
 
 
+# --- Instagram's rules for messages from a business ------------------------------------
+
+INSTAGRAM_CHANNEL = "instagram"
+# A business may only message a customer within 24 hours of the customer's last message.
+INSTAGRAM_WINDOW = timedelta(hours=24)
+# One text message may be at most 1000 bytes (Arabic letters take about 2 bytes each).
+INSTAGRAM_MAX_TEXT_BYTES = 1000
+
+
+def instagram_window_open(db: sqlite3.Connection, customer: str, now: datetime) -> bool:
+    """Whether Instagram still lets us message this customer automatically. False when
+    we have no record of the conversation or of their last message - we can't be sure."""
+    row = db.execute("SELECT last_customer_message_at FROM conversations WHERE channel = ? AND channel_user_id = ?",
+                     (INSTAGRAM_CHANNEL, customer)).fetchone()
+    if row is None or not row[0]:
+        return False
+    return now < datetime.fromisoformat(row[0]) + INSTAGRAM_WINDOW
+
+
 class InstagramSender:
     """Sends a text as an Instagram Direct Message (Instagram API with Instagram Login).
 
     Returns Instagram's id for the sent message, so its echo can be recognised.
-    Instagram only delivers replies within 24 hours of the customer's last message,
-    and a text may be at most 1000 bytes - the caller checks both before sending.
+    Instagram only delivers messages within 24 hours of the customer's last message -
+    the caller checks that before sending (instagram_window_open). A text over
+    1000 bytes is refused here.
     """
 
     # Meta error codes that mean "busy, try later" (rate limits, temporary problems).
@@ -77,6 +97,10 @@ class InstagramSender:
         self._post = post or _graph_post
 
     def send(self, recipient: str, text: str) -> str:
+        size = len(text.encode("utf-8"))
+        if size > INSTAGRAM_MAX_TEXT_BYTES:
+            raise SendError(f"the message is {size} bytes - Instagram allows at most {INSTAGRAM_MAX_TEXT_BYTES}",
+                            permanent=True)
         try:
             answer = self._post("me/messages", {"recipient": {"id": recipient}, "message": {"text": text}},
                                 self._token)
@@ -119,7 +143,12 @@ def _graph_post(path: str, body: dict, token: str) -> dict:
         raise GraphError(f"Could not reach Instagram ({reason})") from None
 
 
-def default_senders(log_path: Path, clock: Callable[[], datetime]) -> dict[str, Sender]:
+def default_senders(log_path: Path, clock: Callable[[], datetime],
+                    instagram_token: str | None = None) -> dict[str, Sender]:
     """Which sender handles which channel. A channel missing here can't be sent to:
-    its messages fail, and the owner gets a handoff."""
-    return {channel: LogSender(log_path, channel, clock) for channel in LOG_CHANNELS}
+    its messages fail, and the owner gets a handoff. Instagram is included when
+    there is an access token."""
+    senders: dict[str, Sender] = {channel: LogSender(log_path, channel, clock) for channel in LOG_CHANNELS}
+    if instagram_token:
+        senders[INSTAGRAM_CHANNEL] = InstagramSender(instagram_token)
+    return senders

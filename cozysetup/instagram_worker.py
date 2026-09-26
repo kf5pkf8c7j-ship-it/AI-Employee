@@ -35,15 +35,15 @@ from pathlib import Path
 from cozysetup.agent import ConversationLog
 from cozysetup.bookings import MAX_PROOF_BYTES, BookingService
 from cozysetup.conversations import ConversationStore, StoredConversation
-from cozysetup.database import Actor, HandoffType, InboundStatus, Language, ReplyKind, ReplyStatus
+from cozysetup.database import Actor, HandoffType, InboundStatus, Language, OutboxStatus, ReplyKind, ReplyStatus
 from cozysetup.language import detect_language
 from cozysetup.replies import render
-from cozysetup.senders import SendError, Sender
+from cozysetup.senders import INSTAGRAM_CHANNEL, INSTAGRAM_MAX_TEXT_BYTES, INSTAGRAM_WINDOW, SendError, Sender
 from cozysetup.settings import MODEL
 
-CHANNEL = "instagram"
-WINDOW = timedelta(hours=24)           # Instagram: replies only within 24 hours of the customer's last message
-MAX_TEXT_BYTES = 1000                  # Instagram's limit for one text message (Arabic: ~2 bytes a letter)
+CHANNEL = INSTAGRAM_CHANNEL
+WINDOW = INSTAGRAM_WINDOW              # Instagram: replies only within 24 hours of the customer's last message
+MAX_TEXT_BYTES = INSTAGRAM_MAX_TEXT_BYTES   # one text message (Arabic: ~2 bytes a letter)
 MAX_ATTEMPTS = 3
 # How long to wait after a failed attempt before the next one: after the 1st, after the 2nd.
 RETRY_WAITS = (timedelta(minutes=1), timedelta(minutes=5))
@@ -99,6 +99,13 @@ def read_incoming(row: sqlite3.Row, timezone) -> Incoming:
         is_echo=bool(message.get("is_echo")), external_id=row["external_id"],
         text=str(message.get("text") or "").strip(), image_urls=tuple(images), unsupported=tuple(unsupported),
     )
+
+
+def _same_text(ours: str, echoed: str) -> bool:
+    """Exactly the same message - ignoring only line-ending style and space at the ends."""
+    def normal(text: str) -> str:
+        return text.replace("\r\n", "\n").strip()
+    return normal(ours) == normal(echoed)
 
 
 def describe_unsupported(kinds) -> str:
@@ -267,12 +274,18 @@ class InstagramWorker:
             return self._attempt_failed(batch, error)
 
     def _handle_echo(self, echo: Incoming) -> Outcome:
-        ours = self.db.execute("SELECT id FROM conversation_replies WHERE external_id = ?",
-                               (echo.external_id,)).fetchone()
+        # Ours: a chat reply this worker sent, or a confirmation/reminder the outbox sent.
+        ours = self.db.execute(
+            "SELECT 1 FROM conversation_replies WHERE external_id = ? UNION ALL SELECT 1 FROM outbox WHERE external_id = ?",
+            (echo.external_id, echo.external_id)).fetchone()
         if ours:
             with self.service.write_transaction():
                 self._finish(echo, InboundStatus.IGNORED, "echo of our own reply")
             return Outcome(echo.customer_id, "echo", "our own reply came back - nothing to do")
+        if self._is_system_message(echo):
+            with self.service.write_transaction():
+                self._finish(echo, InboundStatus.IGNORED, "a confirmation or reminder (matched by its text)")
+            return Outcome(echo.customer_id, "echo", "a confirmation or reminder - the AI keeps answering")
 
         # The owner wrote to the customer in the Instagram app: the AI steps back (decision C).
         stored = self.store.get_or_create(CHANNEL, echo.customer_id)
@@ -295,6 +308,23 @@ class InstagramWorker:
 
         self.store.save_agent(stored, agent, also)
         return Outcome(echo.customer_id, "owner_replied", "the owner replied in Instagram - AI paused")
+
+    def _is_system_message(self, echo: Incoming) -> bool:
+        """An echo whose id we don't know, but whose text is exactly one of this customer's
+        confirmations or reminders: the owner sent a "send yourself" message in the app, or
+        the outbox sent it and hasn't saved Instagram's id yet (or crashed before saving it).
+        That is not the owner taking over the conversation, so the AI isn't paused.
+        The same for a chat reply of ours still being sent. Cancelled messages don't count."""
+        if not echo.text:
+            return False
+        texts = self.db.execute(
+            "SELECT text FROM outbox WHERE channel = ? AND recipient = ? AND status IN (?, ?, ?, ?) "
+            "UNION ALL SELECT r.text FROM conversation_replies r JOIN conversations c ON c.id = r.conversation_id "
+            "WHERE c.channel = ? AND c.channel_user_id = ? AND r.status = ?",
+            (CHANNEL, echo.customer_id, OutboxStatus.PENDING.value, OutboxStatus.SENT.value,
+             OutboxStatus.FAILED.value, OutboxStatus.SEND_YOURSELF.value,
+             CHANNEL, echo.customer_id, ReplyStatus.PENDING.value)).fetchall()
+        return any(_same_text(row["text"], echo.text) for row in texts)
 
     def _handle_customer(self, batch: list[Incoming]) -> Outcome:
         stored = self.store.get_or_create(CHANNEL, batch[0].customer_id)

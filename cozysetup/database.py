@@ -16,7 +16,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cozysetup.d
 
 # The current table version. An older file is upgraded step by step with the
 # MIGRATIONS below; a newer one (made by newer code) is refused.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 # --- The values the database accepts ------------------------------------------
@@ -270,6 +270,12 @@ CREATE TABLE conversation_replies (
 
 CREATE INDEX conversation_replies_pending ON conversation_replies (status, id);
 CREATE UNIQUE INDEX conversation_replies_sent_id ON conversation_replies (external_id) WHERE external_id IS NOT NULL;
+""",
+    5: """
+-- Confirmations and reminders sent on Instagram: Instagram's id for the sent
+-- message, so its echo is recognised as ours (not as the owner replying).
+ALTER TABLE outbox ADD COLUMN external_id TEXT;
+CREATE UNIQUE INDEX outbox_sent_id ON outbox (external_id) WHERE external_id IS NOT NULL;
 """,
 }
 

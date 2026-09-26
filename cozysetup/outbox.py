@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from cozysetup.business_info import BusinessInfo
 from cozysetup.database import BookingStatus, Language, OutboxKind, OutboxStatus
 from cozysetup.replies import booking_values, render
-from cozysetup.senders import SendError
+from cozysetup.senders import INSTAGRAM_CHANNEL, SendError, instagram_window_open
 
 # The channel for bookings the owner entered: no chat to send to, so the
 # owner sends these messages personally.
@@ -44,6 +44,7 @@ class OutboxMessage:
     created_at: datetime
     sent_at: datetime | None
     updated_at: datetime | None = None
+    external_id: str | None = None   # the channel's id for the sent message (Instagram)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> OutboxMessage:
@@ -62,6 +63,7 @@ class OutboxMessage:
             created_at=datetime.fromisoformat(row["created_at"]),
             sent_at=datetime.fromisoformat(row["sent_at"]) if row["sent_at"] else None,
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            external_id=row["external_id"],
         )
 
 
@@ -207,11 +209,15 @@ MAX_ATTEMPTS = 3
 RETRY_WAITS = (timedelta(minutes=5), timedelta(minutes=30))
 
 
+# Why an Instagram message is left for the owner (decision A).
+OUTSIDE_INSTAGRAM_WINDOW = "Instagram's 24-hour window is closed (or the customer's last message is unknown)"
+
+
 @dataclass(frozen=True)
 class Delivery:
     message: OutboxMessage
     reference: str
-    outcome: str         # "sent", "retry", "failed", "cancelled" or "error"
+    outcome: str         # "sent", "retry", "failed", "cancelled", "send_yourself" or "error"
     detail: str
 
 
@@ -289,6 +295,16 @@ def _deliver_one(service, senders: dict, message: OutboxMessage, now: datetime) 
                        (OutboxStatus.CANCELLED.value, reason, stamp, message.id, OutboxStatus.PENDING.value))
             service.add_system_history(booking.id, "outbox", f"{message.kind.value} not sent: {reason}")
             return Delivery(message, booking.reference, "cancelled", reason)
+        if message.channel == INSTAGRAM_CHANNEL and not instagram_window_open(db, message.recipient, service.now()):
+            # Instagram won't deliver it any more: the owner sends it personally. Checked at
+            # sending time, so a reminder goes automatically only if the customer wrote recently -
+            # with the time right now, not when this round started (a round can take a while).
+            db.execute("UPDATE outbox SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = ?",
+                       (OutboxStatus.SEND_YOURSELF.value, OUTSIDE_INSTAGRAM_WINDOW, stamp, message.id,
+                        OutboxStatus.PENDING.value))
+            service.add_system_history(booking.id, "outbox",
+                                       f"{message.kind.value} left for the owner to send: {OUTSIDE_INSTAGRAM_WINDOW}")
+            return Delivery(message, booking.reference, "send_yourself", OUTSIDE_INSTAGRAM_WINDOW)
         claimed = db.execute(
             "UPDATE outbox SET attempts = attempts + 1, updated_at = ? "
             "WHERE id = ? AND status = ? AND attempts = ?",
@@ -299,7 +315,7 @@ def _deliver_one(service, senders: dict, message: OutboxMessage, now: datetime) 
 
     # 2. Send, outside the database.
     attempt = message.attempts + 1
-    error = _send(senders, message)
+    sent_id, error = _send(senders, message)
 
     # 3. Record the result, in one transaction - but only if the message is still
     #    pending. If it was cancelled while send() was running (e.g. the owner
@@ -316,8 +332,8 @@ def _deliver_one(service, senders: dict, message: OutboxMessage, now: datetime) 
                             f"cancelled while sending - the {kind} {what}")
 
         if error is None:
-            db.execute("UPDATE outbox SET status = ?, sent_at = ?, last_error = NULL, updated_at = ? WHERE id = ?",
-                       (OutboxStatus.SENT.value, stamp, stamp, message.id))
+            db.execute("UPDATE outbox SET status = ?, sent_at = ?, last_error = NULL, external_id = ?, updated_at = ? "
+                       "WHERE id = ?", (OutboxStatus.SENT.value, stamp, sent_id, stamp, message.id))
             service.add_system_history(booking.id, "outbox", f"{kind} sent {where}")
             return Delivery(message, booking.reference, "sent", where)
 
@@ -364,15 +380,16 @@ def _no_longer_valid(info: BusinessInfo, booking, message: OutboxMessage, now: d
     return None
 
 
-def _send(senders: dict, message: OutboxMessage):
-    """Returns None on success, or a SendError describing what went wrong."""
+def _send(senders: dict, message: OutboxMessage) -> tuple[str | None, SendError | None]:
+    """Returns (the channel's id for the sent message, if it gives one; None) on success,
+    or (None, a SendError describing what went wrong)."""
     sender = senders.get(message.channel)
     if sender is None:
-        return SendError(f"no sender is set up for the {message.channel!r} channel", permanent=True)
+        return None, SendError(f"no sender is set up for the {message.channel!r} channel", permanent=True)
     try:
-        sender.send(message.recipient, message.text)
+        sent_id = sender.send(message.recipient, message.text)
     except SendError as error:
-        return error
+        return None, error
     except Exception as error:   # a bug in one sender must not stop the others; treat it as temporary
-        return SendError(f"{type(error).__name__}: {error}")
-    return None
+        return None, SendError(f"{type(error).__name__}: {error}")
+    return (str(sent_id) if sent_id else None), None

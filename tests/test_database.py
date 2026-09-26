@@ -180,7 +180,7 @@ def columns(connection, table):
 
 
 def test_a_new_database_starts_at_the_latest_version(db):
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     assert "language" in columns(db, "bookings")
 
 
