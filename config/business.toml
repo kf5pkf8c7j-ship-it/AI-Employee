@@ -306,14 +306,13 @@ en = "The owner will contact you about your booking."
 ar = ""
 
 # --- Instagram --------------------------------------------------------------
-# PROPOSED wording (Step 7.4) - NOT yet approved by the owner. Edit before going live.
 
 # Sent before the first reply in each Instagram conversation.
 [replies.automated_disclosure]
 en = "Hi! You're chatting with CozySetup's automated assistant. The owner can see this chat and may reply personally."
-ar = ""
+ar = "هلا! هذا المساعد الآلي من CozySetup. صاحب المشروع يشوف المحادثة وممكن يرد عليكم شخصياً."
 
 # Sent when a customer sends a voice note, video, sticker, reel or shared post/story.
 [replies.unsupported_message]
 en = "Sorry, I can't open voice notes, videos, stickers, reels or shared posts. Please send your message as text."
-ar = ""
+ar = "المعذرة، ما أقدر أفتح الرسائل الصوتية أو الفيديوهات أو الستيكرات أو الريلز أو المنشورات. ياليت ترسلون رسالتكم كتابة."
