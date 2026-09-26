@@ -80,6 +80,34 @@ happens. Stop it with Ctrl+C. To send once and stop: `uv run cozysetup-outbox ru
 
 ---
 
+## Instagram DMs
+
+Two programs work together, each in its own Terminal window:
+```
+uv run cozysetup-instagram serve     # receives DMs from Meta and records them (no replies)
+uv run cozysetup-instagram work      # answers them with the AI and sends the replies - for real
+```
+Meta reaches `serve` through the HTTPS tunnel. `work` answers the customer's messages in order;
+several messages sent in a row get one answer. The first reply in each conversation starts with
+the automated-assistant notice. Voice notes, videos, stickers, reels and shares get the
+"unsupported" reply. Messages older than 24 hours are not answered.
+
+**When you reply yourself in the Instagram app, the AI stops answering that customer** — it
+won't talk over you. The customer's later messages are kept, so the AI knows the conversation
+when it takes over again. To let the AI answer again:
+```
+uv run cozysetup-instagram conversations      # shows every conversation, and which are paused
+uv run cozysetup-instagram resume CUSTOMER_ID # the id shown in the list
+```
+
+If a reply can't be sent (after 3 tries, or because Instagram's 24-hour reply window has closed),
+you get a handoff with the exact text, so you can send it yourself.
+
+Not connected yet: confirmations and reminders for Instagram bookings are not sent on Instagram.
+The outbox gives you a handoff for them instead — send them yourself.
+
+---
+
 ## Practising safely
 
 The practice chat and the practice database never touch your real bookings:
@@ -119,9 +147,10 @@ uv run pytest
 | Your business facts, prices, wording | `config/business.toml` — check it with `uv run python -m cozysetup.show_business_info` |
 | The API key | `.env` — never commit it, never paste it into a chat |
 | Real bookings | `data/cozysetup.db` |
-| Database backups made before upgrades | `data/*.before-v2.bak` |
+| Database backups made before upgrades | `data/*.before-v2.bak`, `.before-v3.bak`, `.before-v4.bak` |
 | Payment screenshots | `data/payment_proofs/` |
 | Messages "delivered" to chat customers | `data/outbox_delivered.log` |
+| The AI's Instagram conversation logs | `data/conversations/instagram_*.jsonl` |
 | Practice data | `data/practice/` |
 | Test conversation reports | `data/evals/` |
 

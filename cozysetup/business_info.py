@@ -46,6 +46,8 @@ REQUIRED_REPLIES = {
     "handoff": set(),
     "same_day": set(),
     "date_conflict_status": set(),
+    "automated_disclosure": set(),
+    "unsupported_message": set(),
 }
 
 

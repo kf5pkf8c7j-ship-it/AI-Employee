@@ -304,3 +304,16 @@ ar = ""
 [replies.date_conflict_status]
 en = "The owner will contact you about your booking."
 ar = ""
+
+# --- Instagram --------------------------------------------------------------
+# PROPOSED wording (Step 7.4) - NOT yet approved by the owner. Edit before going live.
+
+# Sent before the first reply in each Instagram conversation.
+[replies.automated_disclosure]
+en = "Hi! You're chatting with CozySetup's automated assistant. The owner can see this chat and may reply personally."
+ar = ""
+
+# Sent when a customer sends a voice note, video, sticker, reel or shared post/story.
+[replies.unsupported_message]
+en = "Sorry, I can't open voice notes, videos, stickers, reels or shared posts. Please send your message as text."
+ar = ""

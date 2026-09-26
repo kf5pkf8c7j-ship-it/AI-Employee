@@ -66,16 +66,16 @@ def make_version_2_file(path):
     db.close()
 
 
-def test_a_version_2_database_is_upgraded_to_3_keeping_its_data(tmp_path):
+def test_a_version_2_database_is_upgraded_to_the_latest_keeping_its_data(tmp_path):
     path = tmp_path / "cozysetup.db"
     make_version_2_file(path)
     db = connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert db.execute("SELECT summary FROM handoffs").fetchone()[0] == "windy?"
     for table in ("conversations", "conversation_attachments", "inbound_messages"):
         assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
     db.close()
-    backup = sqlite3.connect(tmp_path / "cozysetup.db.before-v3.bak")
+    backup = sqlite3.connect(tmp_path / f"cozysetup.db.before-v{SCHEMA_VERSION}.bak")
     assert backup.execute("PRAGMA user_version").fetchone()[0] == 2
     backup.close()
 

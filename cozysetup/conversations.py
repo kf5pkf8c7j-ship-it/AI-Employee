@@ -10,6 +10,7 @@ and the images the customer sent.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -93,9 +94,13 @@ class ConversationStore:
         agent.customer_language = stored.language
         return agent
 
-    def save_agent(self, stored: StoredConversation, agent: Agent) -> StoredConversation:
+    def save_agent(self, stored: StoredConversation, agent: Agent,
+                   also: Callable[[], None] | None = None) -> StoredConversation:
         """Save everything the Agent needs to continue later. New images are written
-        to files first, then everything is recorded in one transaction."""
+        to files first, then everything is recorded in one transaction.
+
+        `also` runs inside that same transaction - e.g. the Instagram worker saves the
+        replies to send and marks the customer's messages done: all of it, or none."""
         known = {row["number"] for row in self.db.execute(
             "SELECT number FROM conversation_attachments WHERE conversation_id = ?", (stored.id,))}
         new_files = []
@@ -118,6 +123,8 @@ class ConversationStore:
                 "UPDATE conversations SET history = ?, last_preview = ?, language = ?, updated_at = ? WHERE id = ?",
                 (history_to_json(agent.messages), preview_to_json(agent.conversation.last_preview),
                  language, stamp, stored.id))
+            if also:
+                also()
         return self.reload(stored)
 
     # --- Facts about the conversation ------------------------------------------------------

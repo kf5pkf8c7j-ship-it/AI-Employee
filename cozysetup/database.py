@@ -16,7 +16,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cozysetup.d
 
 # The current table version. An older file is upgraded step by step with the
 # MIGRATIONS below; a newer one (made by newer code) is refused.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 # --- The values the database accepts ------------------------------------------
@@ -71,6 +71,27 @@ class OutboxStatus(StrEnum):
     SENT = "sent"
     FAILED = "failed"                # gave up after retries - the owner was told
     CANCELLED = "cancelled"          # no longer needed (booking cancelled or moved)
+
+
+class InboundStatus(StrEnum):
+    WAITING = "waiting"   # recorded by the webhook, not processed yet (or being retried)
+    DONE = "done"         # processed: the replies are saved, or nothing needed saying
+    FAILED = "failed"     # could not be processed - the owner was told
+    IGNORED = "ignored"   # deliberately not answered (too old, or our own echo)
+
+
+class ReplyKind(StrEnum):
+    DISCLOSURE = "disclosure"    # "automated assistant", before the first reply in a conversation
+    REPLY = "reply"              # the AI's answer
+    UNSUPPORTED = "unsupported"  # voice notes, videos, stickers, reels, shares
+
+
+class ReplyStatus(StrEnum):
+    PENDING = "pending"              # saved, waiting to be sent (or retried)
+    SENT = "sent"
+    SEND_YOURSELF = "send_yourself"  # Instagram's 24-hour window closed: the owner sends it
+    FAILED = "failed"                # gave up - the owner was told
+    CANCELLED = "cancelled"          # the owner took over the conversation before it was sent
 
 
 # --- The tables -----------------------------------------------------------------
@@ -222,6 +243,33 @@ CREATE TABLE inbound_messages (
 ) STRICT;
 
 CREATE INDEX inbound_waiting ON inbound_messages (status, received_at);
+""",
+    4: """
+-- Processing an inbound message can fail for a moment (e.g. an image download):
+-- it is tried again later, a limited number of times.
+ALTER TABLE inbound_messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0);
+ALTER TABLE inbound_messages ADD COLUMN last_attempt_at TEXT;
+
+-- The replies to send in a conversation (Instagram), saved together with the
+-- conversation before they are sent, then sent in order. One row per Instagram
+-- message: a long reply is split into several rows.
+CREATE TABLE conversation_replies (
+    id               INTEGER PRIMARY KEY,
+    conversation_id  INTEGER NOT NULL REFERENCES conversations (id),
+    kind             TEXT    NOT NULL CHECK (kind IN ('disclosure', 'reply', 'unsupported')),
+    text             TEXT    NOT NULL,
+    status           TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN
+                         ('pending', 'sent', 'send_yourself', 'failed', 'cancelled')),
+    attempts         INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error       TEXT,
+    external_id      TEXT,                          -- Instagram's message id once sent: recognises its echo
+    created_at       TEXT    NOT NULL,
+    updated_at       TEXT    NOT NULL,
+    sent_at          TEXT
+) STRICT;
+
+CREATE INDEX conversation_replies_pending ON conversation_replies (status, id);
+CREATE UNIQUE INDEX conversation_replies_sent_id ON conversation_replies (external_id) WHERE external_id IS NOT NULL;
 """,
 }
 
