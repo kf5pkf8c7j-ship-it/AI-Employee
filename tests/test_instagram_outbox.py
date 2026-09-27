@@ -282,9 +282,9 @@ def test_a_version_4_database_is_upgraded_keeping_its_outbox(tmp_path):
     service = BookingService(connect(path), INFO, clock=lambda: MONDAY_2PM, proofs_dir=tmp_path / "p")
     booking = instagram_booking(service)
     assert message(service, booking, OutboxKind.CONFIRMATION).external_id is None
-    assert service.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert service.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     service.db.close()
-    backup = sqlite3.connect(tmp_path / "cozysetup.db.before-v5.bak")
+    backup = sqlite3.connect(tmp_path / f"cozysetup.db.before-v{SCHEMA_VERSION}.bak")
     assert backup.execute("PRAGMA user_version").fetchone()[0] == 4
     backup.close()
 
@@ -324,10 +324,14 @@ def test_a_send_yourself_confirmation_sent_by_the_owner_does_not_pause_the_ai(s)
     assert message(s.service, booking, OutboxKind.CONFIRMATION).status is OutboxStatus.SEND_YOURSELF
 
     result = owner_echo(s, confirmation_text(s.service, booking))
-    assert result.what == "echo"
-    assert s.conversation() is None                              # nothing paused - not even created
+    assert result.what == "marked_sent"                          # recognised, and recorded as sent
+    assert not s.conversation().ai_paused
     assert s.inbound()[-1]["status"] == "ignored"
     assert "matched by its text" in s.inbound()[-1]["error"]
+    sent = message(s.service, booking, OutboxKind.CONFIRMATION)
+    assert sent.status is OutboxStatus.SENT and sent.external_id == "mid.typed.in.the.app"
+    assert any("sent by the owner in Instagram (recognised automatically)" in line
+               for line in history(s.service, booking))
 
 
 def test_a_send_yourself_reminder_sent_by_the_owner_does_not_pause_the_ai(s):
@@ -338,7 +342,7 @@ def test_a_send_yourself_reminder_sent_by_the_owner_does_not_pause_the_ai(s):
     outbox.deliver_due(s.service, {"instagram": PretendInstagram()})
     reminder = message(s.service, booking, OutboxKind.REMINDER)
     assert reminder.status is OutboxStatus.SEND_YOURSELF
-    assert owner_echo(s, reminder.text).what == "echo"
+    assert owner_echo(s, reminder.text).what == "marked_sent"
     assert not s.conversation().ai_paused
 
 
@@ -376,7 +380,7 @@ def test_line_ending_style_and_outer_spaces_are_ignored_when_matching(s):
     booking = instagram_booking(s.service)
     outbox.deliver_due(s.service, {"instagram": PretendInstagram()})
     typed = "  " + confirmation_text(s.service, booking).replace("\n", "\r\n") + "\n"
-    assert owner_echo(s, typed).what == "echo"
+    assert owner_echo(s, typed).what == "marked_sent"
 
 
 def test_the_owner_writing_anything_else_still_pauses_the_ai(s):
@@ -436,7 +440,7 @@ def test_the_window_is_checked_at_the_moment_of_sending_not_at_the_start_of_the_
 
 def test_the_instagram_worker_command_cannot_read_the_real_token_in_tests(tmp_path, capsys):
     from cozysetup.serve_instagram import main
-    code = main(["work", "--once", "--db", str(tmp_path / "x.db")], client=PretendOpenAI())
+    code = main(["work", "--once", "--only", "@tester", "--db", str(tmp_path / "x.db")], client=PretendOpenAI())
     assert code == 1
     assert "no Instagram token in tests" in capsys.readouterr().err
 

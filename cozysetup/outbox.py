@@ -195,6 +195,26 @@ def mark_sent_by_owner(service, message_id: int, note: str = "") -> OutboxMessag
     return get_message(service.db, message_id)
 
 
+def mark_sent_from_echo(service, message_id: int, external_id: str) -> bool:
+    """The owner sent this "send yourself" message in the Instagram app, word for word:
+    Instagram told us (its echo). Recorded like mark-sent. Returns False - and changes
+    nothing - if it is no longer a "send yourself" message of a confirmed booking."""
+    with service.write_transaction():
+        message = get_message(service.db, message_id)
+        if message is None or message.status is not OutboxStatus.SEND_YOURSELF:
+            return False
+        booking = service.get_booking_by_id(message.booking_id)
+        if booking.status is not BookingStatus.CONFIRMED:
+            return False
+        stamp = service.now().isoformat(timespec="seconds")
+        service.db.execute(
+            "UPDATE outbox SET status = ?, sent_at = ?, external_id = ?, updated_at = ? WHERE id = ? AND status = ?",
+            (OutboxStatus.SENT.value, stamp, external_id, stamp, message.id, OutboxStatus.SEND_YOURSELF.value))
+        service.add_system_history(booking.id, "outbox",
+                                   f"{message.kind.value} sent by the owner in Instagram (recognised automatically)")
+    return True
+
+
 # --- Delivering due messages (the outbox sender) -------------------------------------
 #
 # Each due message is handled on its own:

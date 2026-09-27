@@ -90,17 +90,18 @@ class Downloads:
 
 
 class Setup:
-    def __init__(self, path, client=None, sender=None, download=None):
+    def __init__(self, path, client=None, sender=None, download=None, **worker_options):
         self.path = path
         self.clock = Clock()
         self.db = connect(path)
-        self.service = BookingService(self.db, INFO, clock=self.clock, proofs_dir=path.parent / "proofs")
-        self.store = ConversationStore(self.service, path.parent / "attachments")
+        # The same folders the real commands use, next to the database.
+        self.service = BookingService(self.db, INFO, clock=self.clock, proofs_dir=path.parent / "payment_proofs")
+        self.store = ConversationStore(self.service, path.parent / "conversation_attachments")
         self.client = client or PretendOpenAI()
         self.sender = sender or PretendSender()
         self.download = download or Downloads()
         self.worker = InstagramWorker(self.service, self.store, self.client, self.sender,
-                                      download=self.download, log_dir=path.parent / "logs")
+                                      download=self.download, log_dir=path.parent / "logs", **worker_options)
         self.mids = 0
 
     def receive(self, *events, at=None):
@@ -231,7 +232,7 @@ def test_an_image_is_downloaded_and_given_to_the_agent_as_an_attachment(make):
     assert s.client.requests[0]["input"][-1] == {"role": "user", "content": "[Customer attached image #1]"}
     [attachment] = s.db.execute("SELECT * FROM conversation_attachments").fetchall()
     assert attachment["number"] == 1
-    assert (s.path.parent / "attachments" / str(attachment["conversation_id"]) / attachment["file_name"]) \
+    assert (s.path.parent / "conversation_attachments" / str(attachment["conversation_id"]) / attachment["file_name"]) \
         .read_bytes() == JPG
 
 
@@ -323,7 +324,7 @@ def test_after_resuming_the_ai_answers_again_without_a_second_disclosure(make, c
     s.receive(s.dm("Owner here", echo=True))
     s.worker.run_once()
     assert main(["resume", CUSTOMER, "--db", str(s.path)], clock=s.clock) == 0
-    assert "answers 1234567890123456 again" in capsys.readouterr().out
+    assert "answers Instagram id 1234567890123456 (username not known yet) again" in capsys.readouterr().out
     s.receive(s.dm("Thank you"))
     s.worker.run_once()
     assert [t for _, t in s.sender.sent] == [DISCLOSURE, "Hello!", "You're welcome!"]
@@ -605,7 +606,8 @@ def test_work_once_answers_and_sends(make, capsys):
     s = make()
     s.receive(s.dm("Hi"))
     client, sender = PretendOpenAI(answer(text("Hello!"))), PretendSender()
-    assert main(["work", "--once", "--db", str(s.path)], client=client, sender=sender, clock=s.clock) == 0
+    assert main(["work", "--once", "--answer-everyone", "--db", str(s.path)], client=client, sender=sender,
+                profiles=lambda customer: (None, None), clock=s.clock) == 0
     out = capsys.readouterr().out
     assert "answered" in out and "sent" in out
     assert [t for _, t in sender.sent] == [DISCLOSURE, "Hello!"]
@@ -614,7 +616,8 @@ def test_work_once_answers_and_sends(make, capsys):
 def test_work_keeps_going_after_a_failed_round(make, capsys, monkeypatch):
     s = make()
     monkeypatch.setattr(InstagramWorker, "run_once", lambda self: 1 / 0)
-    assert main(["work", "--db", str(s.path)], client=PretendOpenAI(), sender=PretendSender(), clock=s.clock,
+    assert main(["work", "--only", "@tester", "--db", str(s.path)], client=PretendOpenAI(), sender=PretendSender(),
+                profiles=lambda customer: ("tester", None), clock=s.clock,
                 sleep=lambda seconds: None, max_rounds=2) == 0
     assert capsys.readouterr().err.count("this round failed") == 2
 

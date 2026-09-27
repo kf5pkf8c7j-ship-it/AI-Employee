@@ -38,6 +38,16 @@ class StoredConversation:
     last_customer_message_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    username: str | None = None          # Instagram @username, without the @
+    display_name: str | None = None
+    profile_checked_at: datetime | None = None
+
+    @property
+    def who(self) -> str:
+        """How the owner recognises the customer, e.g. "@sara.k (Sara)"."""
+        if self.username:
+            return f"@{self.username}" + (f" ({self.display_name})" if self.display_name else "")
+        return f"Instagram id {self.channel_user_id} (username not known yet)"
 
     @classmethod
     def from_row(cls, row) -> StoredConversation:
@@ -50,6 +60,8 @@ class StoredConversation:
             paused_at=moment(row["paused_at"]), pause_reason=row["pause_reason"],
             last_customer_message_at=moment(row["last_customer_message_at"]),
             created_at=moment(row["created_at"]), updated_at=moment(row["updated_at"]),
+            username=row["username"], display_name=row["display_name"],
+            profile_checked_at=moment(row["profile_checked_at"]),
         )
 
 
@@ -74,6 +86,38 @@ class ConversationStore:
                 "INSERT OR IGNORE INTO conversations (channel, channel_user_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?)", (channel, channel_user_id, stamp, stamp))
         return self.get(channel, channel_user_id)
+
+    def find(self, channel: str, who: str) -> StoredConversation | None:
+        """By @username (with or without the @, any capitals) or by the channel's id."""
+        who = who.strip()
+        row = self.db.execute("SELECT * FROM conversations WHERE channel = ? AND username = ? COLLATE NOCASE",
+                              (channel, normalize_username(who))).fetchone()
+        if row is None:
+            row = self.db.execute("SELECT * FROM conversations WHERE channel = ? AND channel_user_id = ?",
+                                  (channel, who)).fetchone()
+        return StoredConversation.from_row(row) if row else None
+
+    def all(self, channel: str) -> list[StoredConversation]:
+        """Most recently active first."""
+        rows = self.db.execute("SELECT * FROM conversations WHERE channel = ? ORDER BY updated_at DESC, id DESC",
+                               (channel,))
+        return [StoredConversation.from_row(row) for row in rows]
+
+    def set_profile(self, stored: StoredConversation, username: str | None,
+                    display_name: str | None) -> StoredConversation:
+        """What Instagram said about the customer (None when it couldn't say)."""
+        with self.service.write_transaction():
+            stamp = self._stamp()
+            self.db.execute(
+                "UPDATE conversations SET username = COALESCE(?, username), display_name = COALESCE(?, display_name), "
+                "profile_checked_at = ? WHERE id = ?",
+                (normalize_username(username) if username else None, display_name, stamp, stored.id))
+        return self.reload(stored)
+
+    def transcript(self, stored: StoredConversation) -> list[tuple[str, str]]:
+        """The conversation as the owner reads it: (who, text) - customer, AI or owner."""
+        row = self.db.execute("SELECT history FROM conversations WHERE id = ?", (stored.id,)).fetchone()
+        return readable_history(json.loads(row["history"]))
 
     def reload(self, stored: StoredConversation) -> StoredConversation:
         return StoredConversation.from_row(
@@ -166,6 +210,40 @@ class ConversationStore:
 
     def _stamp(self) -> str:
         return self.service.now().isoformat(timespec="seconds")
+
+
+# --- Reading a conversation --------------------------------------------------------------------
+
+OWNER_NOTE_PREFIX = "(The owner replied personally: "
+
+
+def normalize_username(username: str) -> str:
+    return username.strip().lstrip("@").strip().lower()
+
+
+def readable_history(history: list) -> list[tuple[str, str]]:
+    """Customer and AI messages, and the owner's own replies - without the AI's
+    internal steps (reasoning, tool calls and their results)."""
+    lines = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "user" and isinstance(item.get("content"), str):
+            lines.append(("customer", item["content"]))
+        elif item.get("role") == "assistant" and isinstance(item.get("content"), str):
+            text = item["content"]
+            if text.startswith(OWNER_NOTE_PREFIX) and text.endswith(")"):
+                lines.append(("owner", text[len(OWNER_NOTE_PREFIX):-1]))
+            else:
+                lines.append(("ai", text))
+        elif item.get("type") == "message":
+            said = "\n\n".join(part.get("text", "") for part in item.get("content") or []
+                                if isinstance(part, dict) and part.get("type") == "output_text").strip()
+            if said:
+                lines.append(("ai", said))
+        elif item.get("type") == "function_call":
+            lines.append(("tool", str(item.get("name"))))
+    return lines
 
 
 # --- Turning what the Agent keeps into JSON and back ----------------------------------------

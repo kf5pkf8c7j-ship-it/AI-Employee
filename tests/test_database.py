@@ -56,7 +56,8 @@ def test_creates_the_file_and_tables(tmp_path):
     connection.close()
     assert path.exists()
     assert tables == {"bookings", "booking_events", "handoffs", "outbox",
-                      "conversations", "conversation_attachments", "inbound_messages", "conversation_replies"}
+                      "conversations", "conversation_attachments", "inbound_messages", "conversation_replies",
+                      "heartbeats"}
 
 
 def test_opening_again_keeps_the_data(tmp_path):
@@ -180,7 +181,7 @@ def columns(connection, table):
 
 
 def test_a_new_database_starts_at_the_latest_version(db):
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
     assert "language" in columns(db, "bookings")
 
 

@@ -289,7 +289,12 @@ class BookingService:
         """The AI creates a PENDING_PAYMENT booking for a customer. Every rule is
         checked again here, whatever was checked earlier in the conversation.
         Same-day bookings are refused - they are handed to the owner.
-        `language` is the language the customer writes in: en, ar or arabizi."""
+        `language` is the language the customer writes in: en, ar or arabizi.
+
+        Asking again with exactly the same details - same customer, date, location,
+        name, phone and payment choice - while that booking still waits for payment
+        returns the existing booking instead of creating a second one (e.g. when a
+        message is processed again after a failure)."""
         booking_id, _ = self._create_booking(
             booking_date=booking_date, location_id=location_id, customer_name=customer_name,
             customer_phone=customer_phone, payment_choice=payment_choice,
@@ -409,6 +414,17 @@ class BookingService:
                 customer_phone=customer_phone, payment_choice=payment_choice, for_owner=actor is Actor.OWNER,
             )
             name, phone, choice, amounts = preview.customer_name, preview.customer_phone, preview.payment_choice, preview.amounts
+            if actor is Actor.AI:
+                same = self.db.execute(
+                    "SELECT id FROM bookings WHERE channel = ? AND channel_user_id = ? AND booking_date = ? "
+                    "AND location_id = ? AND customer_name = ? AND customer_phone = ? AND payment_choice = ? "
+                    "AND status IN (?, ?) ORDER BY id LIMIT 1",
+                    (channel, channel_user_id, booking_date.isoformat(), location_id, name, phone, choice.value,
+                     BookingStatus.PENDING_PAYMENT.value, BookingStatus.PAYMENT_SUBMITTED.value)).fetchone()
+                if same:
+                    self._record_event(same["id"], actor, "duplicate_request",
+                                       details="the same booking was requested again - no second booking created")
+                    return same["id"], []
             booking_id = self.db.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM bookings").fetchone()[0]
             now = self._timestamp()
             self.db.execute(

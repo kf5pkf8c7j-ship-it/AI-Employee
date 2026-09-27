@@ -62,7 +62,7 @@ change to any fact.
 
 The standard setup is {values['start_time']} to {values['end_time']} for \
 {values['base_price']} {values['currency']}. Customers do not choose a time: every booking you make is
-AI makes is this standard booking. One setup per day in total.
+this standard booking. One setup per day in total.
 
 Locations (always show customers the official names, never the ids):
 {locations}

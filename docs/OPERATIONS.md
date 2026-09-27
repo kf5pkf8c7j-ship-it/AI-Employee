@@ -84,33 +84,55 @@ happens. Stop it with Ctrl+C. To send once and stop: `uv run cozysetup-outbox ru
 
 ## Instagram DMs
 
-Two programs work together, each in its own Terminal window:
+Three programs work together, each in its own Terminal window:
 ```
-uv run cozysetup-instagram serve     # receives DMs from Meta and records them (no replies)
-uv run cozysetup-instagram work      # answers them with the AI and sends the replies - for real
+uv run cozysetup-instagram serve                      # receives DMs from Meta and records them (no replies)
+uv run cozysetup-instagram work --only @tester1       # answers them with the AI - for real
+uv run cozysetup-outbox watch                         # sends confirmations and reminders
 ```
-Meta reaches `serve` through the HTTPS tunnel. `work` answers the customer's messages in order;
-several messages sent in a row get one answer. The first reply in each conversation starts with
-the automated-assistant notice. Voice notes, videos, stickers, reels and shares get the
-"unsupported" reply. Messages older than 24 hours are not answered.
+Meta reaches `serve` through the HTTPS tunnel. `work` must be told who it may answer:
+`--only @user1,@user2` answers **only** those accounts (test mode — anyone else's messages wait
+for you, and appear in the overview), or `--answer-everyone` for the real launch.
+The first live test follows `docs/LIVE_TEST.md`.
+
+`work` answers each customer's messages in order; several messages sent in a row get one
+answer. The first reply in each conversation starts with the automated-assistant notice. Voice
+notes, videos, stickers, reels and shares get the "unsupported" reply. Messages older than
+24 hours are not answered. It learns each customer's @username the first time they write.
+
+**Seeing what's going on:**
+```
+uv run cozysetup-admin overview                 # includes an INSTAGRAM section: is the worker running,
+                                                # waiting/failed messages, paused chats
+uv run cozysetup-admin conversations            # every Instagram chat, by @username
+uv run cozysetup-admin conversation @username   # one chat in full: what the customer, the AI and you said
+uv run cozysetup-instagram status               # the INSTAGRAM section on its own
+```
 
 **When you reply yourself in the Instagram app, the AI stops answering that customer** — it
 won't talk over you. The customer's later messages are kept, so the AI knows the conversation
-when it takes over again. To let the AI answer again:
+when it takes over again. You can also stop it without writing, and let it answer again:
 ```
-uv run cozysetup-instagram conversations      # shows every conversation, and which are paused
-uv run cozysetup-instagram resume CUSTOMER_ID # the id shown in the list
+uv run cozysetup-admin pause @username "I'll handle the discount"
+uv run cozysetup-admin resume @username
 ```
 
 If a reply can't be sent (after 3 tries, or because Instagram's 24-hour reply window has closed),
-you get a handoff with the exact text, so you can send it yourself.
+you get a handoff with the exact text, so you can send it yourself. Handoffs, bookings and the
+outbox show the customer's @username, so you can find the chat in the Instagram app.
 
 **Confirmations and reminders for Instagram bookings** are sent on Instagram by the outbox sender
 (`cozysetup-outbox watch`) — but only if the customer wrote in the last 24 hours, because Instagram
 doesn't allow more. Otherwise they appear in `cozysetup-admin outbox` as **send yourself**, showing
-who to write to ("Instagram DM to …") and the exact text; send it in the Instagram app, then
-`cozysetup-admin mark-sent #`. The reminder is checked on the booking day, so it usually needs you.
-They are sent even while the AI is paused in that chat.
+who to write to ("Instagram DM to @username …") and the exact text. Copy it into the Instagram
+app **word for word**: the system recognises it and marks it as sent by itself, and the AI keeps
+answering that customer. (If you change the text, it counts as you taking over the chat — the AI
+pauses, and you mark the message sent with `cozysetup-admin mark-sent #`.) The reminder is
+checked on the booking day, so it usually needs you. Confirmations and reminders are sent even
+while the AI is paused in that chat.
+
+If the same customer asks for exactly the same booking again while it waits for payment, they get
+their existing booking back — never a second one.
 
 ---
 
@@ -153,7 +175,7 @@ uv run pytest
 | Your business facts, prices, wording | `config/business.toml` — check it with `uv run python -m cozysetup.show_business_info` |
 | The API key | `.env` — never commit it, never paste it into a chat |
 | Real bookings | `data/cozysetup.db` |
-| Database backups made before upgrades | `data/*.before-v2.bak` … `.before-v5.bak` |
+| Database backups made before upgrades | `data/*.before-v2.bak` … `.before-v6.bak` |
 | Payment screenshots | `data/payment_proofs/` |
 | Messages "delivered" to chat customers | `data/outbox_delivered.log` |
 | The AI's Instagram conversation logs | `data/conversations/instagram_*.jsonl` |

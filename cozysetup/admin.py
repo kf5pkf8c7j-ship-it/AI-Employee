@@ -6,6 +6,10 @@
     uv run cozysetup-admin approve CS-0001 "25 KWD received"
     uv run cozysetup-admin overview
     uv run cozysetup-admin outbox
+    uv run cozysetup-admin conversations
+    uv run cozysetup-admin conversation @username
+    uv run cozysetup-admin pause @username "I'll handle this one"
+    uv run cozysetup-admin resume @username
 
 Every command goes through the BookingService, so every booking rule applies.
 Add --db PATH to practise on a separate database instead of the real one.
@@ -32,6 +36,8 @@ from cozysetup.business_info import (
 )
 from cozysetup.database import DEFAULT_DB_PATH, BookingStatus, HandoffStatus, HandoffType, OutboxKind, OutboxStatus, connect
 from cozysetup.rules import PaymentChoice, format_kwd
+from cozysetup.conversations import ConversationStore, StoredConversation
+from cozysetup.instagram_status import instagram_customer, instagram_status
 from cozysetup.senders import INSTAGRAM_CHANNEL
 
 STATUS_LABELS = {
@@ -132,6 +138,7 @@ class Context:
     show: Display
     ask: Callable[[str], str]           # asks the owner a question; normally input()
     open_file: Callable[[Path], None]   # shows a file; normally Preview
+    conversations: ConversationStore | None = None   # Instagram conversations
 
     def date(self, value: date | str) -> date:
         """Turn "today"/"tomorrow" into a date (Kuwait time)."""
@@ -198,7 +205,10 @@ def command_show(ctx: Context, args: argparse.Namespace) -> int:
           f"{format_time_en(pricing.start_time)} – {format_time_en(pricing.end_time)}")
     print(f"  Location:    {show.location(booking.location_id)}")
     print(f"  Customer:    {booking.customer_name}  {booking.customer_phone}")
-    print(f"  Came via:    {booking.channel}")
+    came_via = booking.channel
+    if booking.channel == INSTAGRAM_CHANNEL:
+        came_via += f"  {instagram_customer(service.db, booking.channel_user_id)}"
+    print(f"  Came via:    {came_via}")
     print(f"  Rental:      {show.money(booking.amounts.rental_price)}")
     print(f"  Via Wamd:    {show.payment(booking)}")
     print(f"  On the day:  {show.due_on_day(booking)}")
@@ -446,6 +456,135 @@ def command_proof(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Instagram conversations ---------------------------------------------------------------
+
+def find_conversation(ctx: Context, who: str) -> StoredConversation | None:
+    stored = ctx.conversations.find(INSTAGRAM_CHANNEL, who)
+    if stored is None:
+        print(f"✗ No Instagram conversation with {who} - see: cozysetup-admin conversations", file=sys.stderr)
+    return stored
+
+
+def command_conversations(ctx: Context, args: argparse.Namespace) -> int:
+    conversations = ctx.conversations.all(INSTAGRAM_CHANNEL)
+    if not conversations:
+        print("No Instagram conversations yet.")
+        return 0
+    db = ctx.service.db
+    for stored in conversations:
+        state = f"⏸ AI paused ({stored.pause_reason})" if stored.ai_paused else "AI answering"
+        last = when(stored.last_customer_message_at) if stored.last_customer_message_at else "-"
+        print(f"{stored.who}")
+        print(f"    {state} · language {stored.language.value if stored.language else '?'} · "
+              f"last customer message {last}")
+        notes = conversation_notes(db, stored)
+        if notes:
+            print(f"    {' · '.join(notes)}")
+    print("\nOne conversation in full:  uv run cozysetup-admin conversation @username")
+    return 0
+
+
+def conversation_notes(db, stored: StoredConversation) -> list[str]:
+    def count(sql: str, *values) -> int:
+        return db.execute(sql, values).fetchone()[0]
+    notes = []
+    waiting = count("SELECT COUNT(*) FROM inbound_messages WHERE channel = ? AND channel_user_id = ? "
+                    "AND status = 'waiting'", INSTAGRAM_CHANNEL, stored.channel_user_id)
+    if waiting:
+        notes.append(f"{waiting} message(s) not answered yet")
+    for status, label in (("pending", "reply part(s) waiting to be sent"), ("failed", "reply part(s) failed"),
+                          ("send_yourself", "reply part(s) for you to send")):
+        n = count("SELECT COUNT(*) FROM conversation_replies WHERE conversation_id = ? AND status = ?",
+                  stored.id, status)
+        if n:
+            notes.append(f"{n} {label}")
+    handoffs = count("SELECT COUNT(*) FROM handoffs WHERE channel = ? AND channel_user_id = ? AND status = 'open'",
+                     INSTAGRAM_CHANNEL, stored.channel_user_id)
+    if handoffs:
+        notes.append(f"{handoffs} open handoff(s)")
+    return notes
+
+
+def command_conversation(ctx: Context, args: argparse.Namespace) -> int:
+    stored = find_conversation(ctx, args.who)
+    if stored is None:
+        return 1
+    service, db = ctx.service, ctx.service.db
+    print(stored.who)
+    if stored.ai_paused:
+        print(f"  ⏸ AI paused since {when(stored.paused_at)}: {stored.pause_reason}")
+        print(f"    To let the AI answer again: uv run cozysetup-admin resume {args.who}")
+    else:
+        print("  AI answering")
+    print(f"  Language: {stored.language.value if stored.language else 'not known yet'}")
+    if stored.last_customer_message_at:
+        closes = stored.last_customer_message_at + timedelta(hours=24)
+        window = "open" if service.now() < closes else "closed"
+        print(f"  Last customer message: {when(stored.last_customer_message_at)} "
+              f"(Instagram's 24-hour window is {window})")
+    bookings = db.execute("SELECT reference FROM bookings WHERE channel = ? AND channel_user_id = ? ORDER BY id",
+                          (INSTAGRAM_CHANNEL, stored.channel_user_id)).fetchall()
+    for row in bookings:
+        booking = service.get_booking(row["reference"])
+        print(f"  Booking {booking.reference}: {ctx.show.day(booking.booking_date)}, "
+              f"{ctx.show.location(booking.location_id)} - {ctx.show.status(booking)}")
+    for note in conversation_notes(db, stored):
+        print(f"  {note}")
+
+    lines = ctx.conversations.transcript(stored)
+    shown = lines if args.all else lines[-20:]
+    print(f"\n  Conversation ({len(lines)} entries{'' if args.all or len(lines) <= 20 else ', the last 20 - all: --all'}):")
+    labels = {"customer": "Customer", "ai": "AI", "owner": "You", "tool": "  (AI used"}
+    for who_said, text in shown:
+        if who_said == "tool":
+            print(f"    {labels['tool']} {text})")
+            continue
+        first, *rest = text.splitlines() or [""]
+        print(f"    {labels[who_said] + ':':<10}{first}")
+        for line in rest:
+            print(f"    {'':<10}{line}")
+
+    unsent = db.execute("SELECT id, kind, status, last_error, text FROM conversation_replies "
+                        "WHERE conversation_id = ? AND status NOT IN ('sent') ORDER BY id", (stored.id,)).fetchall()
+    if unsent:
+        print("\n  Replies not sent:")
+        for row in unsent:
+            reason = f" - {row['last_error']}" if row["last_error"] else ""
+            print(f"    #{row['id']} {row['kind']} {row['status']}{reason}: {first_line(row['text'])}")
+    return 0
+
+
+def command_pause(ctx: Context, args: argparse.Namespace) -> int:
+    stored = find_conversation(ctx, args.who)
+    if stored is None:
+        return 1
+    if stored.ai_paused:
+        print(f"The AI is already paused for {stored.who}.")
+        return 0
+    reason = args.reason.strip() or "Paused by the owner"
+    if not ctx.confirm(args, [f"Pause the AI for {stored.who}? It won't answer them until you resume it.",
+                              "  Confirmations and reminders for their bookings are still sent."]):
+        return 1
+    ctx.conversations.pause_ai(stored, reason)
+    print(f"✓ AI paused for {stored.who}. Their messages are kept; answer them yourself in Instagram.")
+    return 0
+
+
+def command_resume(ctx: Context, args: argparse.Namespace) -> int:
+    stored = find_conversation(ctx, args.who)
+    if stored is None:
+        return 1
+    if not stored.ai_paused:
+        print(f"The AI is already answering {stored.who}.")
+        return 0
+    if not ctx.confirm(args, [f"Let the AI answer {stored.who} again, from their next message?",
+                              f"  Paused since {when(stored.paused_at)}: {stored.pause_reason}"]):
+        return 1
+    ctx.conversations.resume_ai(stored)
+    print(f"✓ The AI answers {stored.who} again, from their next message.")
+    return 0
+
+
 def command_overview(ctx: Context, args: argparse.Namespace) -> int:
     service, show = ctx.service, ctx.show
     today = show.today
@@ -485,8 +624,17 @@ def command_overview(ctx: Context, args: argparse.Namespace) -> int:
     if failed:
         attention = True
         print(f"  {len(failed)} message(s) failed to send - see: outbox, handoffs")
+    instagram = instagram_status(service.db, service.now())
+    if instagram.needs_attention and instagram.in_use:
+        attention = True
+        print("  Instagram needs you - see below")
     if not attention:
         print("  Nothing - all clear.")
+
+    if instagram.in_use:
+        print("\nINSTAGRAM")
+        for line in instagram.lines(when):
+            print(f"  {line}")
 
     print("\nTODAY")
     todays = [booking for booking in confirmed if booking.booking_date == today]
@@ -548,7 +696,7 @@ def command_outbox(ctx: Context, args: argparse.Namespace) -> int:
         print(f"\n{title} ({len(group)})")
         for message in group:
             booking = service.get_booking_by_id(message.booking_id)
-            target = send_yourself_target(message, booking) if message.status is OutboxStatus.SEND_YOURSELF \
+            target = send_yourself_target(message, booking, service.db) if message.status is OutboxStatus.SEND_YOURSELF \
                 else f"{message.recipient} ({message.channel})"
             print(f"  #{message.id:<3} {message.kind.value:<13} {booking.reference} {booking.customer_name}"
                   f"  → {target}   {describe_message_state(message, now)}")
@@ -600,7 +748,7 @@ def command_mark_sent(ctx: Context, args: argparse.Namespace) -> int:
         return fail(f"Message #{message.id} can't be marked as sent: {booking.reference} is {booking.status.value}")
 
     lines = [f"Mark message #{message.id} as sent? ({message.kind.value} for {booking.reference}, "
-             f"{booking.customer_name}, to {send_yourself_target(message, booking)})"]
+             f"{booking.customer_name}, to {send_yourself_target(message, booking, service.db)})"]
     lines += [f"    {line}" for line in message.text.splitlines()]
     if message.status is OutboxStatus.FAILED:
         lines.append("  Automatic sending failed - you contacted the customer yourself. "
@@ -633,18 +781,24 @@ def report_confirmation_messages(ctx: Context, booking: Booking) -> None:
             print(f"📋 Send yourself: the confirmation now, to {confirmation.recipient} "
                   f"(no reminder: confirmed after its time, {reminder_hour}). See: cozysetup-admin outbox")
         return
-    print(f"✓ Confirmation queued for the customer ({confirmation.channel}) - it goes out with cozysetup-outbox.")
+    if confirmation.channel == INSTAGRAM_CHANNEL:
+        print("✓ Confirmation queued for Instagram. cozysetup-outbox sends it if the customer wrote in the last "
+              "24 hours; otherwise it appears in 'cozysetup-admin outbox' for you to send yourself.")
+    else:
+        print(f"✓ Confirmation queued for the customer ({confirmation.channel}) - it goes out with cozysetup-outbox.")
     if reminder:
         print(f"Reminder queued for {when(reminder.send_after)}.")
     else:
         print(f"No reminder: confirmed after its time ({reminder_hour}).")
 
 
-def send_yourself_target(message, booking: Booking) -> str:
+def send_yourself_target(message, booking: Booking, db=None) -> str:
     """Where the owner sends a message personally. An Instagram id means nothing to
     the owner, so an Instagram message shows who to write to in the app."""
     if message.channel == INSTAGRAM_CHANNEL:
-        return f"Instagram DM to {booking.customer_name} ({booking.customer_phone})"
+        known = instagram_customer(db, message.recipient) if db is not None else ""
+        username = f" {known}" if known.startswith("@") else ""
+        return f"Instagram DM to{username} {booking.customer_name} ({booking.customer_phone})"
     return message.recipient
 
 
@@ -692,6 +846,8 @@ def describe_handoff(ctx: Context, handoff: Handoff) -> str:
         customer = f"{booking.reference} - {customer}" if customer else booking.reference
     if customer:
         lines.append(f"    Customer: {customer}")
+    if handoff.channel == INSTAGRAM_CHANNEL and handoff.channel_user_id:
+        lines.append(f"    Instagram: {instagram_customer(ctx.service.db, handoff.channel_user_id)}")
     lines.extend(f"    {line}" for line in handoff.summary.splitlines())
     if handoff.status is HandoffStatus.RESOLVED:
         lines.append(f"    ✓ Resolved {handoff.resolved_at:%a %d %b %H:%M}: {handoff.resolution_note or '(no note)'}")
@@ -794,6 +950,14 @@ def build_parser() -> argparse.ArgumentParser:
     outbox_list.add_argument("--all", action="store_true", help="also sent and cancelled messages")
     outbox_list.set_defaults(handler=command_outbox)
 
+    conversations = commands.add_parser("conversations", help="Instagram conversations, and which are paused")
+    conversations.set_defaults(handler=command_conversations)
+
+    conversation = commands.add_parser("conversation", help="one Instagram conversation in full")
+    conversation.add_argument("who", help="@username (or the Instagram id)")
+    conversation.add_argument("--all", action="store_true", help="the whole conversation, not only the end")
+    conversation.set_defaults(handler=command_conversation)
+
     message = commands.add_parser("message", help="one message in full: exact text, recipient, status")
     message.add_argument("number", type=int, help="the message number, e.g. 3")
     message.set_defaults(handler=command_message)
@@ -827,6 +991,13 @@ def build_parser() -> argparse.ArgumentParser:
     mark_sent.add_argument("number", type=int, help="the message number, e.g. 3")
     mark_sent.add_argument("note", nargs="?", default="", help="optional note, e.g. \"sent on WhatsApp\"")
 
+    pause = acting("pause", "stop the AI answering one Instagram customer (you take over)", command_pause)
+    pause.add_argument("who", help="@username (or the Instagram id)")
+    pause.add_argument("reason", nargs="?", default="", help="optional, e.g. \"I'll handle the discount\"")
+
+    resume = acting("resume", "let the AI answer one Instagram customer again", command_resume)
+    resume.add_argument("who", help="@username (or the Instagram id)")
+
     resolve = acting("resolve", "mark a handoff as dealt with", command_resolve)
     resolve.add_argument("number", type=int, help="the handoff number, e.g. 3")
     resolve.add_argument("note", nargs="?", default="", help="what you did, kept with the handoff")
@@ -859,7 +1030,8 @@ def main(
     try:
         # Screenshots live next to the database, so a practice database has its own.
         service = BookingService(db, info, clock=clock, proofs_dir=args.db.parent / "payment_proofs")
-        return args.handler(Context(service, Display(info, service.today()), ask, open_file), args)
+        conversations = ConversationStore(service, args.db.parent / "conversation_attachments")
+        return args.handler(Context(service, Display(info, service.today()), ask, open_file, conversations), args)
     except BookingRefused as refused:
         print(f"✗ {refused}", file=sys.stderr)
         return 1

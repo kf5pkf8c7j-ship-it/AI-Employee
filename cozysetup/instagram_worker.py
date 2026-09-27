@@ -32,10 +32,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from cozysetup import outbox
 from cozysetup.agent import ConversationLog
 from cozysetup.bookings import MAX_PROOF_BYTES, BookingService
-from cozysetup.conversations import ConversationStore, StoredConversation
+from cozysetup.check_instagram import graph_get
+from cozysetup.conversations import OWNER_NOTE_PREFIX, ConversationStore, StoredConversation, normalize_username
 from cozysetup.database import Actor, HandoffType, InboundStatus, Language, OutboxStatus, ReplyKind, ReplyStatus
+from cozysetup.instagram_status import WORKER_HEARTBEAT
 from cozysetup.language import detect_language
 from cozysetup.replies import render
 from cozysetup.senders import INSTAGRAM_CHANNEL, INSTAGRAM_MAX_TEXT_BYTES, INSTAGRAM_WINDOW, SendError, Sender
@@ -48,6 +51,9 @@ MAX_ATTEMPTS = 3
 # How long to wait after a failed attempt before the next one: after the 1st, after the 2nd.
 RETRY_WAITS = (timedelta(minutes=1), timedelta(minutes=5))
 DOWNLOAD_TIMEOUT_SECONDS = 20
+PROFILE_RETRY = timedelta(minutes=10)   # after a failed username lookup
+HEARTBEAT = WORKER_HEARTBEAT
+NOT_ON_TEST_LIST = "not on the test list (--only) - not answered by the AI"   # the status counts these
 
 # Everything except images is unsupported (decision D). How it is noted in the conversation:
 UNSUPPORTED_NAMES = {
@@ -172,13 +178,26 @@ def download_image(url: str) -> bytes:
     return data
 
 
+class InstagramProfiles:
+    """Looks up a customer's @username and name (read-only). Instagram allows this for
+    people who have messaged the account."""
+
+    def __init__(self, token: str, get: Callable[[str, dict, str], dict] = graph_get):
+        self._token = token
+        self._get = get
+
+    def __call__(self, customer_id: str) -> tuple[str | None, str | None]:
+        answer = self._get(customer_id, {"fields": "username,name"}, self._token)
+        return answer.get("username"), answer.get("name")
+
+
 # --- The worker ------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Outcome:
     customer: str
     what: str       # answered, recorded, echo, owner_replied, ignored, retry, failed,
-                    # sent, send_yourself, cancelled
+                    # sent, send_yourself, cancelled, not_answered, marked_sent
     detail: str
 
 
@@ -195,9 +214,13 @@ class InstagramWorker:
         sender: Sender,
         *,
         download: Callable[[str], bytes] = download_image,
+        profiles: Callable[[str], tuple[str | None, str | None]] | None = None,
+        only: set[str] | None = None,
         log_dir: Path | None = None,
         model: str = MODEL,
     ):
+        """`only`: the @usernames the AI may answer (the test list). None means everyone -
+        the command only allows that when asked explicitly. `profiles` looks up usernames."""
         self.service = service
         self.db = service.db
         self.store = store
@@ -206,13 +229,21 @@ class InstagramWorker:
         self.download = download
         self.log_dir = log_dir
         self.model = model
+        self.profiles = profiles
+        self.only = {normalize_username(name) for name in only} if only is not None else None
 
     def run_once(self) -> list[Outcome]:
         """One round: ignore stale messages, answer the waiting ones, send what's saved."""
         results = self.ignore_stale()
         results += self.process_waiting()
         results += self.send_pending()
+        self._heartbeat(results)
         return results
+
+    def may_answer(self, stored: StoredConversation) -> bool:
+        """The test list: with --only, the AI answers nobody else - not even someone
+        whose username isn't known yet."""
+        return self.only is None or (stored.username is not None and stored.username.lower() in self.only)
 
     # --- 1. Stale messages ----------------------------------------------------------------
 
@@ -237,7 +268,11 @@ class InstagramWorker:
             by_customer.setdefault(incoming.customer_id, []).append(incoming)
 
         results = []
-        for messages in by_customer.values():
+        for customer, messages in by_customer.items():
+            stored = self._with_profile(self.store.get_or_create(CHANNEL, customer))
+            if not self.may_answer(stored):
+                results += self._not_on_the_list(stored, messages)
+                continue
             # Strictly in order per customer: if one waits for a retry, the later ones wait too.
             position = 0
             while position < len(messages):
@@ -260,6 +295,38 @@ class InstagramWorker:
                     break
                 position += len(batch)
         return results
+
+    def _not_on_the_list(self, stored: StoredConversation, messages: list[Incoming]) -> list[Outcome]:
+        """Test mode: the AI never answers this customer. Echoes are still handled (the
+        owner replying pauses the AI, as always); customer messages stay waiting for the
+        owner - and, like any message, are ignored once older than 24 hours."""
+        results = []
+        for message in messages:
+            if message.is_echo:
+                outcome = self._process_batch([message])
+                if outcome:
+                    results.append(outcome)
+                continue
+            with self.service.write_transaction():
+                newly = self.db.execute("UPDATE inbound_messages SET error = ? WHERE id = ? AND status = ? "
+                                        "AND error IS NULL",
+                                        (NOT_ON_TEST_LIST, message.row_id, InboundStatus.WAITING.value)).rowcount
+            if newly:   # report each message once, not every round
+                results.append(Outcome(stored.channel_user_id, "not_answered", f"{stored.who}: {NOT_ON_TEST_LIST}"))
+        return results
+
+    def _with_profile(self, stored: StoredConversation) -> StoredConversation:
+        """Learn the customer's @username once. A failed lookup never stops a reply;
+        it is tried again later."""
+        if stored.username or self.profiles is None:
+            return stored
+        if stored.profile_checked_at and self.service.now() < stored.profile_checked_at + PROFILE_RETRY:
+            return stored
+        try:
+            username, name = self.profiles(stored.channel_user_id)
+        except Exception:
+            username, name = None, None
+        return self.store.set_profile(stored, username, name)
 
     def _process_batch(self, batch: list[Incoming]) -> Outcome | None:
         try:
@@ -285,13 +352,17 @@ class InstagramWorker:
         if self._is_system_message(echo):
             with self.service.write_transaction():
                 self._finish(echo, InboundStatus.IGNORED, "a confirmation or reminder (matched by its text)")
+            marked = self._mark_sent_by_owner(echo)
+            if marked:
+                return Outcome(echo.customer_id, "marked_sent",
+                               f"the owner sent {marked} in Instagram - marked as sent; the AI keeps answering")
             return Outcome(echo.customer_id, "echo", "a confirmation or reminder - the AI keeps answering")
 
         # The owner wrote to the customer in the Instagram app: the AI steps back (decision C).
         stored = self.store.get_or_create(CHANNEL, echo.customer_id)
         agent = self.store.open_agent(self.client, stored, model=self.model)
         what = echo.text or describe_unsupported(echo.unsupported) or "an image"
-        agent.messages.append({"role": "assistant", "content": f"(The owner replied personally: {what})"})
+        agent.messages.append({"role": "assistant", "content": f"{OWNER_NOTE_PREFIX}{what})"})
         now = self._stamp()
 
         def also():
@@ -325,6 +396,17 @@ class InstagramWorker:
              OutboxStatus.FAILED.value, OutboxStatus.SEND_YOURSELF.value,
              CHANNEL, echo.customer_id, ReplyStatus.PENDING.value)).fetchall()
         return any(_same_text(row["text"], echo.text) for row in texts)
+
+    def _mark_sent_by_owner(self, echo: Incoming) -> str | None:
+        """The echo is word for word one of this customer's "send yourself" confirmations
+        or reminders: the owner has sent it - record that (decision: automatic mark-sent)."""
+        rows = self.db.execute("SELECT id, kind, text FROM outbox WHERE channel = ? AND recipient = ? AND status = ? "
+                               "ORDER BY id", (CHANNEL, echo.customer_id, OutboxStatus.SEND_YOURSELF.value)).fetchall()
+        for row in rows:
+            if _same_text(row["text"], echo.text) and outbox.mark_sent_from_echo(self.service, row["id"],
+                                                                                  echo.external_id):
+                return f"the {row['kind']} (#{row['id']})"
+        return None
 
     def _handle_customer(self, batch: list[Incoming]) -> Outcome:
         stored = self.store.get_or_create(CHANNEL, batch[0].customer_id)
@@ -453,13 +535,16 @@ class InstagramWorker:
 
     def send_pending(self) -> list[Outcome]:
         rows = self.db.execute(
-            "SELECT r.*, c.channel_user_id, c.ai_paused, c.last_customer_message_at "
+            "SELECT r.*, c.channel_user_id, c.ai_paused, c.last_customer_message_at, c.username "
             "FROM conversation_replies r JOIN conversations c ON c.id = r.conversation_id "
             "WHERE r.status = ? AND c.channel = ? ORDER BY r.id",
             (ReplyStatus.PENDING.value, CHANNEL)).fetchall()
         results, stopped = [], set()
         for row in rows:
             if row["conversation_id"] in stopped:   # keep the order: nothing overtakes a waiting reply
+                continue
+            if self.only is not None and (row["username"] or "").lower() not in self.only:
+                stopped.add(row["conversation_id"])   # test mode: never an AI reply to anyone else
                 continue
             try:
                 outcome = self._send_one(row)
@@ -565,6 +650,16 @@ class InstagramWorker:
         )
 
     # --- Helpers ------------------------------------------------------------------------------------
+
+    def _heartbeat(self, results: list[Outcome]) -> None:
+        counts: dict[str, int] = {}
+        for result in results:
+            counts[result.what] = counts.get(result.what, 0) + 1
+        details = ", ".join(f"{what} {count}" for what, count in sorted(counts.items())) or "nothing to do"
+        with self.service.write_transaction():
+            self.db.execute("INSERT INTO heartbeats (program, last_round_at, details) VALUES (?, ?, ?) "
+                            "ON CONFLICT (program) DO UPDATE SET last_round_at = excluded.last_round_at, "
+                            "details = excluded.details", (HEARTBEAT, self._stamp(), details))
 
     def _waiting_rows(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM inbound_messages WHERE channel = ? AND status = ? ORDER BY id",

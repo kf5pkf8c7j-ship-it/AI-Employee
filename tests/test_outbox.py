@@ -126,7 +126,10 @@ def test_waiting_bookings_get_no_messages(service):
 
 
 def test_a_refused_approval_queues_nothing(service):
-    first, second = ai_booking(service), ai_booking(service)
+    first = ai_booking(service)
+    second = service.create_booking(
+        booking_date=THURSDAY, location_id="julaia", customer_name="Sara", customer_phone="66666666",
+        payment_choice="deposit", channel="terminal", channel_user_id="customer-2", language="en")
     service.approve_payment(first.reference)
     with pytest.raises(BookingRefused):
         service.approve_payment(second.reference)                 # date already taken

@@ -144,7 +144,7 @@ def test_full_payment_booking(service):
 
 
 def test_references_count_up(service):
-    references = [book(service).reference for _ in range(3)]
+    references = [book(service, channel_user_id=f"customer-{n}").reference for n in range(3)]
     assert references == ["CS-0001", "CS-0002", "CS-0003"]
 
 
@@ -562,8 +562,8 @@ def test_rescheduling_refused(service, new_date, reason):
 
 def test_list_bookings(service):
     book(service, booking_date=date(2026, 10, 8))
-    book(service)
-    book(service)
+    book(service, channel_user_id="customer-2")
+    book(service, channel_user_id="customer-3")
     service.approve_payment("CS-0002")
     assert [b.reference for b in service.list_bookings()] == ["CS-0002", "CS-0003", "CS-0001"]
     assert [b.reference for b in service.list_bookings(statuses=(BookingStatus.CONFIRMED,))] == ["CS-0002"]
@@ -685,3 +685,43 @@ def test_paid_owner_booking_flags_waiting_bookings_like_an_approval(service):
 def test_unpaid_owner_booking_is_approved_like_any_other(service):
     owner_book(service)
     assert service.approve_payment("CS-0001", "cash").booking.status is BookingStatus.CONFIRMED
+
+
+# --- The same booking requested twice (Step 7.6) ---------------------------------------------
+
+def test_the_same_request_again_returns_the_waiting_booking_instead_of_a_second_one(service, db):
+    first = book(service)
+    again = book(service, customer_phone="+965 9999 9999")      # the same phone, written differently
+    assert again.reference == first.reference
+    assert db.execute("SELECT COUNT(*) FROM bookings").fetchone()[0] == 1
+    events = [row["event"] for row in db.execute("SELECT event FROM booking_events ORDER BY id")]
+    assert events == ["created", "duplicate_request"]
+
+
+def test_it_also_returns_the_booking_once_a_screenshot_was_sent(service):
+    first = book(service)
+    service.attach_payment_proof(first.reference, "99999999", JPG)
+    assert book(service).reference == first.reference
+
+
+@pytest.mark.parametrize("changes", [
+    {"channel_user_id": "someone-else"}, {"booking_date": date(2026, 10, 8)}, {"location_id": "bnaider"},
+    {"customer_name": "Ahmad Ali"}, {"customer_phone": "66666666"}, {"payment_choice": "full"},
+], ids=["other customer", "other date", "other location", "other name", "other phone", "other payment"])
+def test_any_different_detail_makes_a_new_booking(service, changes):
+    first = book(service)
+    assert book(service, **changes).reference != first.reference
+
+
+def test_a_cancelled_booking_is_not_reused(service):
+    first = book(service)
+    service.cancel_booking(first.reference)
+    assert book(service).reference != first.reference
+
+
+def test_owner_bookings_are_never_merged(service):
+    request = dict(booking_date=THURSDAY, location_id="julaia", customer_name="Mona", customer_phone="66666666",
+                   payment_choice="full", paid=False)
+    first = service.create_owner_booking(**request).booking
+    second = service.create_owner_booking(**request).booking
+    assert first.reference != second.reference

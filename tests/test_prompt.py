@@ -96,3 +96,8 @@ def test_arabizi_replies_use_latin_letters_and_dinar_with_an_example():
 def test_the_arabizi_example_follows_the_business_file():
     cheaper = replace(INFO, pricing=replace(INFO.pricing, base_price=45))
     assert 'Example: "El setup b 45 dinar min 6 PM ila 11 PM."' in build_system_prompt(cheaper)
+
+
+def test_the_standard_booking_sentence_reads_correctly():
+    assert "Customers do not choose a time: every booking you make is\nthis standard booking." in PROMPT
+    assert "AI makes is" not in PROMPT

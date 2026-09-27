@@ -16,7 +16,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cozysetup.d
 
 # The current table version. An older file is upgraded step by step with the
 # MIGRATIONS below; a newer one (made by newer code) is refused.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 # --- The values the database accepts ------------------------------------------
@@ -276,6 +276,21 @@ CREATE UNIQUE INDEX conversation_replies_sent_id ON conversation_replies (extern
 -- message, so its echo is recognised as ours (not as the owner replying).
 ALTER TABLE outbox ADD COLUMN external_id TEXT;
 CREATE UNIQUE INDEX outbox_sent_id ON outbox (external_id) WHERE external_id IS NOT NULL;
+""",
+    6: """
+-- Who the customer is on Instagram, so the owner can find the chat in the app
+-- (the Instagram id means nothing to a person). Looked up once, from Instagram.
+ALTER TABLE conversations ADD COLUMN username TEXT;               -- without the @
+ALTER TABLE conversations ADD COLUMN display_name TEXT;
+ALTER TABLE conversations ADD COLUMN profile_checked_at TEXT;     -- last lookup attempt
+
+-- The last time each background program finished a round - so the owner can
+-- see whether it is still running.
+CREATE TABLE heartbeats (
+    program      TEXT PRIMARY KEY,                -- e.g. instagram-worker
+    last_round_at TEXT NOT NULL,
+    details      TEXT NOT NULL DEFAULT ''
+) STRICT;
 """,
 }
 
